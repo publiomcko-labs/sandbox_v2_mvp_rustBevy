@@ -19,18 +19,17 @@ jobs:
       CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@v4
-      - name: Linux dependencies for Bevy compile-only preflight
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libasound2-dev libudev-dev
       - name: Pinned Rust 1.100 toolchain
         run: |
           rustup toolchain install 1.100.0 --profile minimal --no-self-update
           rustup default 1.100.0
-      - name: Check B4/B5 functional code and shaders before GPU Release
+      - name: Verify portable world editing and scheduler contracts
         run: |
-          cargo check --locked -p sandbox-game
           cargo test --locked -p sandbox-world-core
           cargo test --locked -p sandbox-streaming
           cargo test --locked -p sandbox-density-gpu-validation b4_density_shader_parses_and_validates
+      # Bevy/Avian full build is intentionally validated by the Windows Release
+      # job below; this portable job avoids unnecessary Linux Wayland dependencies.
   release:
     needs: preflight
     runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
@@ -103,7 +102,7 @@ jobs:
           if-no-files-found: warn
   acceptance:
     needs: benchmark
-    if: always()
+    if: ${{ always() && needs.benchmark.result != 'skipped' && needs.benchmark.result != 'cancelled' }}
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 6
     steps:
