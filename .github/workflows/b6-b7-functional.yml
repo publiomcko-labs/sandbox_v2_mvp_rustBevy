@@ -39,7 +39,7 @@ jobs:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_RELEASE_DEBUG: '0'
       # Cache outside checkout's clean scope; fingerprints still gate every build.
-      CARGO_TARGET_DIR: ${{ runner.workspace }}\\_b6_cargo_target
+      CARGO_TARGET_DIR: ${{ github.workspace }}\\..\\_b6_cargo_target
     steps:
       - uses: actions/checkout@v4
       - name: Native Rust 1.100 toolchain
