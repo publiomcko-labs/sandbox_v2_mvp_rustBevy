@@ -13,8 +13,10 @@ pub fn fly_camera(
     // Warm up the full 130m ring first; never auto-pause to hide gaps.
     static B3_AUTOROUTE: OnceLock<bool> = OnceLock::new();
     let automated = *B3_AUTOROUTE.get_or_init(|| {
-        std::env::var("SANDBOX_STAGE").as_deref() == Ok("B3")
-            && std::env::var("SANDBOX_B3_ROUTE").as_deref() == Ok("straight")
+        matches!(
+            std::env::var("SANDBOX_STAGE").as_deref(),
+            Ok("B3" | "B4" | "B5" | "B6" | "B7")
+        ) && std::env::var("SANDBOX_B3_ROUTE").as_deref() == Ok("straight")
     });
     let mut velocity = Vec3::ZERO;
     if automated && time.elapsed_secs() >= 5.0 {
