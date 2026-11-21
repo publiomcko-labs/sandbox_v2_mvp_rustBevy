@@ -6,6 +6,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: b4-check-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   core:
     runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
@@ -36,3 +39,9 @@ jobs:
       - name: B4 deterministic SDF brushes and reopen tests
         shell: cmd
         run: cargo +1.100.0 test --locked -p sandbox-world-core -p sandbox-streaming
+      - name: Verify edited Bevy GPU runtime and shader contract
+        shell: cmd
+        run: |
+          cargo +1.100.0 test --locked -p sandbox-density-gpu-validation b4_density_shader_parses_and_validates
+          if errorlevel 1 exit /b 1
+          cargo +1.100.0 check --locked -p sandbox-game

@@ -20,14 +20,14 @@ use std::time::Duration;
 fn main() {
     let stage = std::env::var("SANDBOX_STAGE").unwrap_or_default();
     let b0 = stage.eq_ignore_ascii_case("B0");
-    let b3 = stage.eq_ignore_ascii_case("B3");
+    let b3 = ["B3", "B4", "B5", "B6", "B7"].iter().any(|s| stage.eq_ignore_ascii_case(s));
     let headless = !b0
         && (std::env::var("SANDBOX_B2_HEADLESS").as_deref() == Ok("1")
             || std::env::var("SANDBOX_B3_HEADLESS").as_deref() == Ok("1"));
     let title = if b0 {
         "Sandbox V2 - Rust/Bevy B0 GPU bootstrap"
     } else if b3 {
-        "Sandbox V2 - B3 130m GPU streaming (uniform LOD2)"
+        "Sandbox V2 - B4/B5 MVP SDF editing and physics"
     } else {
         "Sandbox V2 - B2 GPU Surface Nets SDF terrain"
     };

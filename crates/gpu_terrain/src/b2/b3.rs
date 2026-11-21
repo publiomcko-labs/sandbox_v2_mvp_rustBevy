@@ -29,11 +29,12 @@ use sandbox_streaming::{
         BLOCKS_PER_FRAME, STREAM_LOD, StreamPlan, block_distance_xz, plan, within_retention,
     },
 };
-use sandbox_world_core::{BlockCoord, density::DensityGrid};
+use sandbox_world_core::{BlockCoord, density::DensityGrid, edits::{Brush, EditMode, WorldEdits}};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Instant,
+    path::PathBuf,
 };
 
 const SEED: u32 = 42;
@@ -55,6 +56,8 @@ impl Plugin for GpuTerrainB3Plugin {
         let ready = B3ReadySet::default();
         app.insert_resource(ready.clone())
             .init_resource::<StreamWorld>()
+            .init_resource::<B4EditState>()
+            .add_systems(Update, b4_brush_input)
             .add_plugins(ExtractComponentPlugin::<BuildSdfMesh>::default())
             .add_systems(Startup, setup_b3_scene)
             .add_systems(PostUpdate, stream_b3);
@@ -86,6 +89,7 @@ impl Plugin for GpuTerrainB3Plugin {
 struct LodSpec {
     lod: u8,
     seam: SeamInfo,
+    revision: u64,
 }
 
 struct ActiveBlock {
@@ -98,6 +102,65 @@ struct ActiveBlock {
 struct PendingUpgrade {
     block: ActiveBlock,
     ready: bool,
+}
+
+#[derive(Resource, Default)]
+struct B4EditState {
+    world: WorldEdits,
+    path: PathBuf,
+    enabled: bool,
+    load_failed: bool,
+    auto_test_done: bool,
+    pending_latency: HashMap<BlockCoord, Instant>,
+}
+
+fn b4_brush_input(
+    mut editor: ResMut<B4EditState>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    time: Res<Time>,
+    camera: Query<&Transform, With<Camera3d>>,
+) {
+    if !editor.enabled || editor.load_failed { return; }
+    let auto = std::env::var("SANDBOX_B4_TEST_BRUSH").as_deref() == Ok("1")
+        && !editor.auto_test_done && time.elapsed_secs() > 8.0;
+    let mode = if auto || mouse.just_pressed(MouseButton::Left) {
+        EditMode::Subtract
+    } else if mouse.just_pressed(MouseButton::Right) {
+        EditMode::Add
+    } else {
+        return;
+    };
+    if auto { editor.auto_test_done = true; }
+    let Some(transform) = camera.iter().next() else { return; };
+    let mut hit = None;
+    // Locate the actual SDF zero crossing, not a fixed point in front of the camera.
+    for step in 1..=200 {
+        let p = transform.translation + transform.forward() * (step as f32 * 0.25);
+        let half = [(p.x * 2.0).round() as i32, (p.y * 2.0).round() as i32, (p.z * 2.0).round() as i32];
+        if editor.world.sample(SEED, half) <= 0.0 {
+            hit = Some(half);
+            break;
+        }
+    }
+    let Some(center_half) = hit else {
+        warn!("B4 input: no SDF surface within ray range (50m)");
+        return;
+    };
+    let previous = editor.world.clone();
+    let brush = Brush { center_half, radius_half: 6, mode };
+    match editor.world.apply(brush) {
+        Err(reason) => error!(reason, "B4 edit rejected"),
+        Ok(changed) => {
+            if let Err(error) = editor.world.save_to(&editor.path) {
+                editor.world = previous;
+                error!(%error, "B4 journal save failed; edit rolled back");
+                return;
+            }
+            let instant = Instant::now();
+            for block in &changed { editor.pending_latency.insert(*block, instant); }
+            info!(?center_half, ?mode, touched=changed.len(), edits=editor.world.len(), "B4 edit persisted; GPU rebuild queued");
+        }
+    }
 }
 
 #[derive(Resource, Default)]
@@ -127,8 +190,26 @@ fn setup_b3_scene(
     mut state: ResMut<StreamWorld>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut editor: ResMut<B4EditState>,
 ) {
     state.baseline_scheduler = std::env::var("SANDBOX_B3_SCHEDULER").as_deref() == Ok("baseline");
+    let stage = std::env::var("SANDBOX_STAGE").unwrap_or_default();
+    editor.enabled = matches!(stage.as_str(), "B4" | "B5" | "B6" | "B7")
+        || std::env::var("SANDBOX_B4_ENABLE").as_deref() == Ok("1");
+    editor.path = std::env::var_os("SANDBOX_B4_SAVE_PATH").map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("world-b4.edits"));
+    if editor.enabled {
+        match WorldEdits::load_from(&editor.path) {
+            Ok(world) => {
+                info!(edits=world.len(), path=%editor.path.display(), "B4 journal loaded");
+                editor.world = world;
+            },
+            Err(error) => {
+                editor.load_failed = true;
+                error!(%error, path=%editor.path.display(), "B4 corrupt journal: edits disabled to protect save");
+            }
+        }
+    }
     // Mixed LOD is deliberately experimental until Vulkan seam and
     // long-route visual gates pass. The B3 reference still defaults LOD2.
     state.mixed_lod = std::env::var("SANDBOX_B3_MIXED_LOD").as_deref() == Ok("1");
@@ -189,6 +270,7 @@ fn create_block(
     material: &Handle<StandardMaterial>,
     coord: BlockCoord,
     spec: LodSpec,
+    world: &WorldEdits,
 ) -> Option<ActiveBlock> {
     let grid = DensityGrid::new(coord, spec.lod).ok()?;
     let (vertex_count, index_count) = b3_mixed_counts(grid, spec.seam.negative_face_mask);
@@ -209,6 +291,7 @@ fn create_block(
                 seed: SEED,
                 seam_mask: spec.seam.negative_face_mask,
                 neighbor_lod_words: spec.seam.neighbor_words,
+                brushes: world.brushes_for_grid(grid),
             },
             Mesh3d(handle.clone()),
             MeshMaterial3d(material.clone()),
@@ -280,6 +363,7 @@ fn stream_b3(
     camera: Query<&Transform, With<Camera3d>>,
     mut state: ResMut<StreamWorld>,
     ready: Res<B3ReadySet>,
+    mut editor: ResMut<B4EditState>,
 ) {
     let cpu_start = Instant::now();
     let Some(transform) = camera.iter().next() else {
@@ -338,7 +422,28 @@ fn stream_b3(
         }
     }
 
-    if state.mixed_lod && !state.transition_target.is_empty() {
+    // Invalidate obsolete GPU work when a newer persisted edit revision arrives.
+    // The currently visible mesh remains until all affected replacement blocks are ready.
+    let dirty: Vec<_> = state.blocks.iter().filter_map(|(&coord, active)| {
+        let revision = editor.world.revision(coord);
+        (revision > active.spec.revision).then_some((coord, LodSpec {
+            lod: active.spec.lod,
+            seam: active.spec.seam,
+            revision,
+        }))
+    }).collect();
+    for (coord, spec) in dirty {
+        if state.transition_target.get(&coord) != Some(&spec) {
+            state.transition_target.insert(coord, spec);
+            if let Some(obsolete) = state.transition_pending.remove(&coord) {
+                commands.entity(obsolete.block.entity).despawn();
+                meshes.remove(obsolete.block.mesh.id());
+                if let Ok(mut set) = ready.0.lock() { set.remove(&obsolete.block.mesh.id()); }
+            }
+        }
+    }
+
+    if !state.transition_target.is_empty() {
         let cohorts =
             connected_ready_components(&state.transition_target, &state.transition_pending);
         for cohort in cohorts {
@@ -357,6 +462,9 @@ fn stream_b3(
                 replacement.block.visible = true;
                 state.blocks.insert(coord, replacement.block);
                 state.transition_commits += 1;
+                if let Some(start) = editor.pending_latency.remove(&coord) {
+                    info!(?coord, latency_ms=start.elapsed().as_secs_f64()*1000.0, "B4 revised GPU mesh ready for publication");
+                }
             }
         }
     }
@@ -414,6 +522,7 @@ fn stream_b3(
                 let spec = LodSpec {
                     lod,
                     seam: seam_info(coord, &levels),
+                    revision: editor.world.revision(coord),
                 };
                 if block.spec != spec {
                     desired.insert(coord, spec);
@@ -449,8 +558,9 @@ fn stream_b3(
         let spec = LodSpec {
             lod: STREAM_LOD,
             seam: SeamInfo::default(),
+            revision: editor.world.revision(coord),
         };
-        if let Some(created) = create_block(&mut commands, &mut meshes, &material, coord, spec) {
+        if let Some(created) = create_block(&mut commands, &mut meshes, &material, coord, spec, &editor.world) {
             state.blocks.insert(coord, created);
             new_count += 1;
             state.dispatches += 1;
@@ -462,7 +572,7 @@ fn stream_b3(
     // Generate up to the remainder of the same CPU/GPU frame budget as
     // replacement chunks. Old geometry persists until every dependent
     // chunk in a connected 3x3x3 cohort has completed GPU extraction.
-    if state.mixed_lod && new_count < limit {
+    if !state.transition_target.is_empty() && new_count < limit {
         let mut coords: Vec<_> = state.transition_target.keys().copied().collect();
         coords.sort_by_key(|c| (c.x, c.y, c.z));
         for coord in coords {
@@ -473,7 +583,7 @@ fn stream_b3(
                 continue;
             }
             let spec = state.transition_target[&coord];
-            if let Some(created) = create_block(&mut commands, &mut meshes, &material, coord, spec)
+            if let Some(created) = create_block(&mut commands, &mut meshes, &material, coord, spec, &editor.world)
             {
                 state.transition_pending.insert(
                     coord,

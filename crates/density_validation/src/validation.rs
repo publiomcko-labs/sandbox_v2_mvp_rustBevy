@@ -1,15 +1,3 @@
-#[test]
-fn b4_density_shader_parses_and_validates() {
-    let shader = include_str!("../../../assets/shaders/sdf_density_b4.wgsl");
-    let module = naga::front::wgsl::parse_str(shader)
-        .unwrap_or_else(|e| panic!("B4 shader parse: {}", e.emit_to_string(shader)));
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    ).validate(&module).expect("B4 shader validation failed");
-    assert!(module.entry_points.iter().any(|e| e.name == "main"));
-}
-
 //! B1 validation. GPU readback is permitted ONLY in this small, ignored
 //! test harness; runtime B2 mesh generation must not read bulk data back.
 
@@ -22,6 +10,18 @@ use std::{
     task::{Context, Poll, Waker},
     time::Duration,
 };
+
+#[test]
+fn b4_density_shader_parses_and_validates() {
+    let shader = include_str!("../../../assets/shaders/sdf_density_b4.wgsl");
+    let module = naga::front::wgsl::parse_str(shader)
+        .unwrap_or_else(|e| panic!("B4 shader parse: {}", e.emit_to_string(shader)));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    ).validate(&module).expect("B4 shader validation failed");
+    assert!(module.entry_points.iter().any(|e| e.name == "main"));
+}
 
 const SHADER: &str = include_str!("../../../assets/shaders/sdf_density.wgsl");
 
