@@ -1,0 +1,67 @@
+name: B5 Windows functional physics preflight (no optimization)
+
+on:
+  push:
+    branches:
+      - 'feat/b5-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: b5-functional-windows-20261121
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 100
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native Rust 1.100 toolchain
+        shell: cmd
+        env:
+          CARGO_HOME: ${{ runner.temp }}\\b0-cargo
+          RUSTUP_HOME: ${{ runner.temp }}\\b0-rustup
+        run: |
+          if not exist "%CARGO_HOME%\\bin\\rustup.exe" (
+            curl.exe --proto =https --tlsv1.2 --retry 3 -fL -o "%RUNNER_TEMP%\\rustup-init.exe" https://win.rustup.rs/x86_64
+            if errorlevel 1 exit /b 1
+            "%RUNNER_TEMP%\\rustup-init.exe" -y --no-modify-path --default-toolchain none
+            if errorlevel 1 exit /b 1
+          )
+          "%CARGO_HOME%\\bin\\rustup.exe" toolchain install 1.100.0 --profile minimal --component rustfmt --no-self-update
+          if errorlevel 1 exit /b 1
+          echo %CARGO_HOME%\\bin>>"%GITHUB_PATH%"
+          echo CARGO_HOME=%CARGO_HOME%>>"%GITHUB_ENV%"
+          echo RUSTUP_HOME=%RUSTUP_HOME%>>"%GITHUB_ENV%"
+      - name: Format working checkout for compiler (publish style diff)
+        shell: cmd
+        run: |
+          cargo +1.100.0 fmt --all
+          git diff > b5-format.patch
+      - name: B4 world edit and GPU shader validation
+        shell: cmd
+        run: |
+          cargo +1.100.0 test --locked -p sandbox-world-core
+          if errorlevel 1 exit /b 1
+          cargo +1.100.0 test --locked -p sandbox-density-gpu-validation b4_density_shader_parses_and_validates
+      - name: Verify B5 Avian physics compiles with full Bevy runtime
+        shell: cmd
+        run: cargo +1.100.0 check --locked -p sandbox-game
+      - name: B5 deterministic water and persisted rock tests
+        shell: cmd
+        run: cargo +1.100.0 test --locked -p sandbox-game -- --nocapture
+      - name: Save formatting evidence on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b5-format-patch
+          path: b5-format.patch
+          if-no-files-found: warn
