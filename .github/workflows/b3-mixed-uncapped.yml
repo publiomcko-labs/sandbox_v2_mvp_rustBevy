@@ -1,0 +1,42 @@
+name: B3 mixed LOD uncapped workload audit (reuse Release)
+
+on:
+  push:
+    branches:
+      - 'diag/b3-uncapped-mixed-perf-20261121'
+    paths:
+      - '.github/workflows/b3-mixed-uncapped.yml'
+      - 'scripts/b3-mixed-uncapped-ci.ps1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: b3-mixed-uncapped-20261121
+  cancel-in-progress: true
+
+jobs:
+  gpu-mixed-uncapped:
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reuse tested B3 mixed LOD Release
+        uses: actions/download-artifact@v4
+        with:
+          name: b3-integrated-mixed-release
+          path: b3-runtime
+          run-id: 44918682965
+          github-token: ${{ github.token }}
+      - name: Benchmark 45s uncapped 1080p mixed LOD at 18m/s
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b3-mixed-uncapped-ci.ps1"
+      - name: Preserve independent result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b3-mixed-uncapped-report
+          path: b3-uncapped-report/
+          if-no-files-found: warn
