@@ -27,11 +27,11 @@ use bevy::{
         renderer::{RenderContext, RenderGraph, RenderQueue},
     },
 };
-use sandbox_world_core::{BlockCoord, density::DensityGrid};
+use sandbox_world_core::{BlockCoord, density::DensityGrid, edits::{Brush, EditMode, MAX_GPU_BRUSHES_PER_BLOCK}};
 use std::collections::HashSet;
 
 const SEED: u32 = 42;
-const DENSITY_SHADER: &str = "shaders/sdf_density.wgsl";
+const DENSITY_SHADER: &str = "shaders/sdf_density_b4.wgsl";
 const EXTRACT_SHADER: &str = "shaders/surface_nets.wgsl";
 const TRANSITION_SHADER: &str = "shaders/lod_transition.wgsl";
 const SEAM_EDGES_PER_FACE: usize = 2 * 32 * 32;
@@ -76,6 +76,7 @@ struct BuildSdfMesh {
     seed: u32,
     seam_mask: u32,
     neighbor_lod_words: [u32; 2],
+    brushes: Vec<Brush>,
 }
 
 fn b2_counts(grid: DensityGrid) -> (usize, usize) {
@@ -146,6 +147,7 @@ fn setup_b2_scene(
                         seed: SEED,
                         seam_mask: 0,
                         neighbor_lod_words: [0; 2],
+                        brushes: Vec::new(),
                     },
                     Mesh3d(handle),
                     MeshMaterial3d(material.clone()),
@@ -240,6 +242,7 @@ fn init_b2_pipelines(mut commands: Commands, assets: Res<AssetServer>, cache: Re
             (
                 uniform_buffer::<B2Params>(false),
                 storage_buffer::<Vec<f32>>(false),
+                storage_buffer_read_only::<Vec<i32>>(false),
             ),
         ),
     );
@@ -386,6 +389,33 @@ fn compute_b2(
             continue;
         }
 
+        if job.brushes.len() > MAX_GPU_BRUSHES_PER_BLOCK {
+            error!(?id, "B4 brush overflow rejected (no silent terrain truncation)");
+            continue;
+        }
+        let mut brush_bytes = Vec::with_capacity(job.brushes.len().max(1) * 32);
+        for brush in &job.brushes {
+            for value in [
+                brush.center_half[0],
+                brush.center_half[1],
+                brush.center_half[2],
+                brush.radius_half,
+                if brush.mode == EditMode::Add { 0 } else { 1 },
+                0, 0, 0,
+            ] {
+                brush_bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        if brush_bytes.is_empty() {
+            brush_bytes.resize(32, 0);
+        }
+        let edits_buffer = context.render_device().create_buffer(&BufferDescriptor {
+            label: Some("B4 immutable block brush records"),
+            size: brush_bytes.len() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&edits_buffer, 0, &brush_bytes);
         let words = job.grid.uniform_words(job.seed);
         let params = B2Params {
             base_x: words[0] as i32,
@@ -401,7 +431,7 @@ fn compute_b2(
             index_start,
             index_end,
             cells,
-            padding0: 0,
+            padding0: job.brushes.len() as u32,
             padding1: job.neighbor_lod_words[0],
             padding2: job.neighbor_lod_words[1],
         };
@@ -417,7 +447,11 @@ fn compute_b2(
         let density_group = context.render_device().create_bind_group(
             None,
             &cache.get_bind_group_layout(&pipelines.density_layout),
-            &BindGroupEntries::sequential((&uniform, density_buffer.as_entire_buffer_binding())),
+            &BindGroupEntries::sequential((
+                &uniform,
+                density_buffer.as_entire_buffer_binding(),
+                edits_buffer.as_entire_buffer_binding(),
+            )),
         );
         let surface_group = context.render_device().create_bind_group(
             None,
