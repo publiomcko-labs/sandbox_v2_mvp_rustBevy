@@ -265,9 +265,13 @@ fn maintain_terrain_colliders(
 /// Exact spherical cap fraction avoids the common linear-depth approximation.
 fn submerged_fraction(center_y:f32,radius:f32,surface_y:f32)->f32 {
     let h=(surface_y-(center_y-radius)).clamp(0.0,2.0*radius);
+    // Exact fully-dry/submerged limits avoid floating-point cancellation
+    // in the spherical-cap division (which gave 0.9999999 instead of 1).
+    if h <= 0.0 { return 0.0; }
+    if h >= 2.0*radius { return 1.0; }
     let volume_cap=std::f32::consts::PI*h*h*(radius-h/3.0);
     let sphere=(4.0/3.0)*std::f32::consts::PI*radius*radius*radius;
-    volume_cap/sphere
+    (volume_cap/sphere).clamp(0.0,1.0)
 }
 fn buoyancy_acceleration(center_y:f32)->f32 {
     9.81 * WATER_DENSITY / ROCK_DENSITY * submerged_fraction(center_y,ROCK_RADIUS,WATER_Y)
@@ -310,6 +314,8 @@ mod tests {
     fn submerged_volume_physics_and_dense_rock_sinks() {
         assert_eq!(submerged_fraction(2.0,0.5,0.0),0.0);
         assert_eq!(submerged_fraction(-2.0,0.5,0.0),1.0);
+        assert!((0.0..=1.0).contains(&submerged_fraction(-0.499,0.5,0.0)));
+        assert!(submerged_fraction(-0.499,0.5,0.0) < 1.0);
         assert!((submerged_fraction(0.0,0.5,0.0)-0.5).abs()<1e-6);
         assert!(buoyancy_acceleration(-1.0)<9.81);
     }
