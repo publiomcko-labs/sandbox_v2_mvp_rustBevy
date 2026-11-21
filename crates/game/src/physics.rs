@@ -34,6 +34,7 @@ struct RockWorld {
     water_entity: Option<Entity>,
     save_path: PathBuf,
     last_save_s: f32,
+    load_failed: bool,
 }
 
 #[derive(Resource, Default)]
@@ -123,7 +124,10 @@ fn setup_rocks_water(
         .unwrap_or_else(|| PathBuf::from("world-b5-rocks.txt"));
     match read_rock_states(&rocks.save_path) {
         Ok(states) => { info!(restored=states.len(), "B5 persistent rocks loaded"); rocks.states = states; },
-        Err(error) => error!(%error, "B5 invalid rock save; refusing to overwrite until fixed"),
+        Err(error) => {
+            rocks.load_failed = true;
+            error!(%error, "B5 invalid rock save; refusing to overwrite until fixed");
+        },
     }
     rocks.mesh = Some(meshes.add(Cuboid::new(0.8, 0.7, 0.9)));
     rocks.material = Some(materials.add(StandardMaterial {
@@ -290,7 +294,7 @@ fn save_rock_states(
     bodies: Query<(&RockId,&Transform,Option<&LinearVelocity>)>,
     mut rocks: ResMut<RockWorld>,
 ) {
-    if time.elapsed_secs()-rocks.last_save_s < 5.0 { return; }
+    if rocks.load_failed || time.elapsed_secs()-rocks.last_save_s < 5.0 { return; }
     rocks.last_save_s=time.elapsed_secs();
     for (id,transform,velocity) in &bodies {
         rocks.states.insert(*id, Snapshot {
