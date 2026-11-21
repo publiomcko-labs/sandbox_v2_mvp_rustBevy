@@ -52,11 +52,18 @@ try {
     if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
 }
 if ($nvidia) { $gpuMemoryAfter = (@(& $nvidia.Source --query-gpu=memory.used --format=csv,noheader,nounits 2>$null) -join ',').Trim() }
-if (-not (Test-Path $env:SANDBOX_B2_CAPTURE_PATH)) { throw 'B6 1080p screenshot missing' }
-if ((Get-Item $env:SANDBOX_B2_CAPTURE_PATH).Length -lt 2000) { throw 'B6 screenshot invalid' }
 $log = (Get-Content -LiteralPath $stderr -Raw) -replace '\x1b\[[0-9;]*m', ''
-if ($log -match '(?m)\bERROR\b|Validation Error|panicked') { throw 'B6 GPU/runtime error; inspect uploaded log' }
-if ($log -notmatch 'Screenshot saved to') { throw 'B6 screenshot not confirmed' }
+# Report the original GPU/Bevy error before asserting screenshot delivery.
+$runtimeErrors = @($log -split "[\r\n]+" | Where-Object {
+    $_ -match '(?i)\bERROR\b|Validation Error|panicked|rendererror'
+} | Select-Object -First 5)
+if ($runtimeErrors.Count -gt 0) {
+    throw "B6 GPU/runtime error: $($runtimeErrors -join ' | ')"
+}
+if (-not (Test-Path $env:SANDBOX_B2_CAPTURE_PATH)) { throw 'B6 1080p screenshot missing; examine first.stderr.log' }
+if ((Get-Item $env:SANDBOX_B2_CAPTURE_PATH).Length -lt 2000) { throw 'B6 screenshot invalid' }
+# Bevy visual_capture emits this message, not 'Screenshot saved to'.
+if ($log -notmatch 'B2 visual CI: screenshot captured at') { throw 'B6 screenshot was not confirmed by Bevy capture system' }
 $ci = [Globalization.CultureInfo]::InvariantCulture
 $frames = New-Object 'System.Collections.Generic.List[Double]'
 $fps = New-Object 'System.Collections.Generic.List[Double]'
