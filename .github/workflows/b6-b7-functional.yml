@@ -1,0 +1,101 @@
+name: B6 B7 functional MVP measurement and acceptance matrix
+on:
+  push:
+    branches:
+      - 'feat/b6-b7-*'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: b6-b7-full-mvp-20261121
+  cancel-in-progress: true
+jobs:
+  release:
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native Rust 1.100 toolchain
+        shell: cmd
+        env:
+          CARGO_HOME: ${{ runner.temp }}\\b0-cargo
+          RUSTUP_HOME: ${{ runner.temp }}\\b0-rustup
+        run: |
+          if not exist "%CARGO_HOME%\\bin\\rustup.exe" (
+            curl.exe --proto =https --tlsv1.2 --retry 3 -fL -o "%RUNNER_TEMP%\\rustup-init.exe" https://win.rustup.rs/x86_64
+            if errorlevel 1 exit /b 1
+            "%RUNNER_TEMP%\\rustup-init.exe" -y --no-modify-path --default-toolchain none
+            if errorlevel 1 exit /b 1
+          )
+          "%CARGO_HOME%\\bin\\rustup.exe" toolchain install 1.100.0 --profile minimal --component rustfmt --no-self-update
+          if errorlevel 1 exit /b 1
+          echo %CARGO_HOME%\\bin>>"%GITHUB_PATH%"
+          echo CARGO_HOME=%CARGO_HOME%>>"%GITHUB_ENV%"
+          echo RUSTUP_HOME=%RUSTUP_HOME%>>"%GITHUB_ENV%"
+      - name: Validate B4/B5 Rust build
+        shell: cmd
+        run: |
+          cargo +1.100.0 check --locked -p sandbox-game
+          if errorlevel 1 exit /b 1
+          cargo +1.100.0 test --locked -p sandbox-world-core
+          if errorlevel 1 exit /b 1
+      - name: Build functional MVP Release (no benchmark optimization)
+        shell: cmd
+        run: cargo +1.100.0 build --release --locked -p sandbox-game
+      - name: Package executable and all shaders
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force dist/b6/assets | Out-Null
+          Copy-Item target/release/sandbox-game.exe dist/b6/sandbox-game.exe
+          Copy-Item assets/shaders dist/b6/assets/shaders -Recurse -Force
+          Copy-Item Cargo.lock dist/b6/Cargo.lock
+          if (-not (Test-Path dist/b6/assets/shaders/sdf_density_b4.wgsl)) { throw 'Missing B4 edited GPU shader' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: b6-b7-functional-release
+          path: dist/b6/
+          if-no-files-found: error
+  benchmark:
+    needs: release
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: b6-b7-functional-release
+          path: b6-runtime
+      - name: Full 45s 1080p GPU route with edit, rock physics, water, persist/reopen
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b6-functional-route-ci.ps1"
+      - name: Save full B6 diagnostics even if gate fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b6-b7-functional-evidence
+          path: b6-b7-report/
+          if-no-files-found: warn
+  acceptance:
+    needs: benchmark
+    if: always()
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: b6-b7-functional-evidence
+          path: b6-b7-report
+      - name: Generate explicit B7 PASS FAIL HOLD matrix
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b7-acceptance-matrix-ci.ps1"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: b7-acceptance-matrix
+          path: b6-b7-report/B7_ACCEPTANCE.json
+          if-no-files-found: warn
