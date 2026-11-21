@@ -234,6 +234,15 @@ struct B2Params {
     padding2: u32,
 }
 
+/// Shader binding 2 is array<EditBrush> with a 32-byte element stride.
+/// Using Vec<i32> here silently advertises 4 bytes as the minimum
+/// and Vulkan rejects the density pipeline before its first frame.
+#[derive(ShaderType)]
+struct B4GpuBrush {
+    center_radius: IVec4,
+    mode_pad: IVec4,
+}
+
 fn init_b2_pipelines(mut commands: Commands, assets: Res<AssetServer>, cache: Res<PipelineCache>) {
     let density_layout = BindGroupLayoutDescriptor::new(
         "B2 density layout",
@@ -242,7 +251,7 @@ fn init_b2_pipelines(mut commands: Commands, assets: Res<AssetServer>, cache: Re
             (
                 uniform_buffer::<B2Params>(false),
                 storage_buffer::<Vec<f32>>(false),
-                storage_buffer_read_only::<Vec<i32>>(false),
+                storage_buffer_read_only::<Vec<B4GpuBrush>>(false),
             ),
         ),
     );
