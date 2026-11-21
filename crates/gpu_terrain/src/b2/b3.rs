@@ -105,8 +105,8 @@ struct PendingUpgrade {
 }
 
 #[derive(Resource, Default)]
-struct B4EditState {
-    world: WorldEdits,
+pub struct B4EditState {
+    pub world: WorldEdits,
     path: PathBuf,
     enabled: bool,
     load_failed: bool,

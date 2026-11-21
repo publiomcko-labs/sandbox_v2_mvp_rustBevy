@@ -1,5 +1,6 @@
 //! B3 opt-in streaming; B2 remains a separate GPU-resident reference checkpoint.
 mod player;
+mod physics;
 mod visual_capture;
 
 use avian3d::prelude::PhysicsPlugins;
@@ -83,6 +84,9 @@ fn main() {
         app.add_plugins(GpuTerrainB3Plugin);
     } else {
         app.add_plugins(GpuTerrainB2Plugin);
+    }
+    if ["B5", "B6", "B7"].iter().any(|s| stage.eq_ignore_ascii_case(s)) {
+        app.add_plugins(physics::MvpPhysicsPlugin);
     }
     visual_capture::configure(&mut app);
     app.add_systems(Update, player::fly_camera).run();
