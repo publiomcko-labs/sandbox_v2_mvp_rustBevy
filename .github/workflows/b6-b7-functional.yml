@@ -10,7 +10,29 @@ concurrency:
   group: b6-b7-full-mvp-20261121
   cancel-in-progress: true
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux dependencies for Bevy compile-only preflight
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libasound2-dev libudev-dev
+      - name: Pinned Rust 1.100 toolchain
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --no-self-update
+          rustup default 1.100.0
+      - name: Check B4/B5 functional code and shaders before GPU Release
+        run: |
+          cargo check --locked -p sandbox-game
+          cargo test --locked -p sandbox-world-core
+          cargo test --locked -p sandbox-streaming
+          cargo test --locked -p sandbox-density-gpu-validation b4_density_shader_parses_and_validates
   release:
+    needs: preflight
     runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
     timeout-minutes: 120
     env:
