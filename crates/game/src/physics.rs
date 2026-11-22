@@ -23,6 +23,10 @@ struct Buoyancy {radius:f32,density:f32}
 enum BuoyancyProbe {Float,Dense}
 #[derive(Resource,Default)]
 struct B8ProbeReport{reported:bool}
+#[derive(Resource,Default)]
+struct B8GroundReport{spawned:bool,reported:bool}
+#[derive(Component)]
+struct B8GroundProbe{starting_ground_y:f32,started_s:f32}
 const COLLIDER_CELL_M: i32 = TILE_METERS;
 const COLLIDER_BUILDS_PER_FRAME: usize = 24;
 const COLLIDER_RADIUS_M: f32 = 24.0;
@@ -61,8 +65,12 @@ impl Plugin for MvpPhysicsPlugin {
         app.init_resource::<RockWorld>()
             .init_resource::<TerrainColliders>()
             .init_resource::<B8ProbeReport>()
+            .init_resource::<B8GroundReport>()
             .add_systems(Startup, (setup_rocks_water,spawn_b8_buoyancy_probes))
-            .add_systems(Update, (stream_rocks, maintain_terrain_colliders, save_rock_states, observe_b8_buoyancy_probes))
+            .add_systems(Update, (
+                stream_rocks, maintain_terrain_colliders, save_rock_states,
+                observe_b8_buoyancy_probes, spawn_b8_ground_probe, observe_b8_ground_probe,
+            ))
             .add_systems(FixedUpdate, buoyancy_for_bodies);
     }
 }
@@ -393,6 +401,59 @@ fn observe_b8_buoyancy_probes(
               qualified,"B8 Avian water buoyancy dynamic probe");
         if !qualified { error!("B8 dynamic fluid behavior failed to demonstrate buoyancy and sinking"); }
     }
+}
+
+/// Start a dry diagnostic sphere after the nearby static SDF trimesh tiles
+/// have had five seconds to stream in. It must come to rest on the SAME SDF
+/// surface used by the renderer, rather than fall through a 4m voxel proxy.
+fn spawn_b8_ground_probe(
+    mut commands:Commands,
+    time:Res<Time>,
+    camera:Query<&Transform,With<Camera3d>>,
+    mut state:ResMut<B8GroundReport>,
+    mut meshes:ResMut<Assets<Mesh>>,
+    mut materials:ResMut<Assets<StandardMaterial>>,
+) {
+    if state.spawned || time.elapsed_secs()<5.25 ||
+        std::env::var("SANDBOX_B8_GROUND_PROBE").as_deref()!=Ok("1"){return;}
+    let Some(cam)=camera.iter().next() else{return;};
+    let x=cam.translation.x+3.0;
+    let z=cam.translation.z;
+    let ground=terrain_height_half(SEED,(x*2.0).round() as i32,(z*2.0).round() as i32);
+    let mesh=meshes.add(Sphere::new(ROCK_RADIUS));
+    let material=materials.add(StandardMaterial{
+        base_color:Color::srgb(0.95,0.30,0.18),..default()
+    });
+    commands.spawn((
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_xyz(x,ground+ROCK_RADIUS+2.0,z),
+        RigidBody::Dynamic,
+        Collider::sphere(ROCK_RADIUS),
+        Restitution::new(0.0),
+        Friction::new(0.8),
+        LinearVelocity::ZERO,
+        B8GroundProbe{starting_ground_y:ground,started_s:time.elapsed_secs()},
+        Name::new("B8 real Avian SDF ground-contact probe"),
+    ));
+    state.spawned=true;
+}
+fn observe_b8_ground_probe(
+    time:Res<Time>,
+    probe:Query<(&B8GroundProbe,&Transform,&LinearVelocity)>,
+    mut state:ResMut<B8GroundReport>,
+) {
+    if state.reported{return;}
+    let Some((p,transform,velocity))=probe.iter().next() else{return;};
+    if time.elapsed_secs()-p.started_s<1.0{return;}
+    let difference=transform.translation.y-p.starting_ground_y;
+    // A freely falling probe starts 2.45m above the SDF surface and would
+    // be several meters below ground after 1s; a contact stays near y+R.
+    let qualified=difference>-0.6 && difference<1.5 && velocity.0.y.is_finite();
+    info!(ground_offset_m=difference,velocity_y=velocity.0.y,qualified,
+          "B8 Avian SDF ground collision probe");
+    if !qualified { error!("B8 dynamic collider contact probe fell through terrain"); }
+    state.reported=true;
 }
 
 fn save_rock_states(
