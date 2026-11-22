@@ -184,6 +184,8 @@ struct StreamWorld {
     transition_pending: HashMap<BlockCoord, PendingUpgrade>,
     transition_commits: u64,
     atomic_publication_errors: u64,
+    lod_audited_frames: u64,
+    lod_bad_frames: u64,
 }
 
 fn setup_b3_scene(
@@ -624,7 +626,20 @@ fn stream_b3(
         }
     }
 
-    let elapsed_us = cpu_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+    // Every render-update frame: a one-frame seam violation must not be
+    // hidden by the one-Hz progress telemetry.
+    let (visible_mixed_pairs,tier_errors,seam_ownership_errors)=
+        audit_visible_lod_seams(&state.blocks);
+    state.lod_audited_frames+=1;
+    if tier_errors>0 || seam_ownership_errors>0 {
+        state.lod_bad_frames+=1;
+        if state.lod_bad_frames==1 {
+            error!(tier_errors,seam_ownership_errors,
+                   "B8 published mixed LOD seam topology violation");
+        }
+    }
+
+        let elapsed_us = cpu_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
     state.cpu_samples_us.push(elapsed_us);
     if state.frame % 60 == 0 {
         // This is deliberately a fresh plan. All reported required/missing
@@ -648,12 +663,6 @@ fn stream_b3(
             .values()
             .filter(|b| b.spec.seam.negative_face_mask != 0)
             .count();
-        let (visible_mixed_pairs,tier_errors,seam_ownership_errors)=
-            audit_visible_lod_seams(&state.blocks);
-        if tier_errors>0 || seam_ownership_errors>0 {
-            error!(tier_errors,seam_ownership_errors,
-                   "B8 published mixed LOD seam topology violation");
-        }
         info!(
             required,
             visible,
@@ -681,6 +690,8 @@ fn stream_b3(
             tier_errors,
             seam_ownership_errors,
             atomic_publication_errors=state.atomic_publication_errors,
+            lod_bad_frames=state.lod_bad_frames,
+            lod_audited_frames=state.lod_audited_frames,
             "B3 horizon coverage (130m, two vertical layers, GPU mesh ready)"
         );
         if required > visible {

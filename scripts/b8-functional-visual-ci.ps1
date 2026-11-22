@@ -48,6 +48,8 @@ $coverage=@()
 $tierErrors=0
 $seamErrors=0
 $atomicErrors=0
+$badLodFrames=0
+$auditedLodFrames=0
 $mixedPairs=0
 $surfaceTiles=0
 $waterQualified=$false
@@ -56,14 +58,16 @@ $runtimeErrors=@()
 foreach($line in ($log -split "[\r\n]+")){
     if($line -match 'B3 horizon coverage'){
         $pFields=@{}
-        foreach($key in @('x','missing','required','visible','tier_errors','seam_ownership_errors','atomic_publication_errors','visible_mixed_pairs')){
+        foreach($key in @('x','missing','required','visible','tier_errors','seam_ownership_errors','atomic_publication_errors','visible_mixed_pairs','lod_bad_frames','lod_audited_frames')){
             if($line -match ("\b"+$key+"=(-?[0-9.]+)")){$pFields[$key]=$Matches[1]}
         }
-        if($pFields.Count -eq 8){
+        if($pFields.Count -eq 10){
             $coverage+=,$pFields
             $tierErrors=[Math]::Max($tierErrors,[int]$pFields.tier_errors)
             $seamErrors=[Math]::Max($seamErrors,[int]$pFields.seam_ownership_errors)
             $atomicErrors=[Math]::Max($atomicErrors,[int]$pFields.atomic_publication_errors)
+            $badLodFrames=[Math]::Max($badLodFrames,[int]$pFields.lod_bad_frames)
+            $auditedLodFrames=[Math]::Max($auditedLodFrames,[int]$pFields.lod_audited_frames)
             $mixedPairs=[Math]::Max($mixedPairs,[int]$pFields.visible_mixed_pairs)
         }
     }
@@ -97,6 +101,8 @@ $metrics=[ordered]@{
     lod_tier_violations=$tierErrors;
     lod_seam_ownership_violations=$seamErrors;
     atomic_publication_errors=$atomicErrors;
+    lod_bad_frames=$badLodFrames;
+    lod_audited_frames=$auditedLodFrames;
     sdf_surface_collider_tiles=$surfaceTiles;
     water_dynamic_probe_observed=($probeCount -gt 0);
     water_dynamic_probe_qualified=$waterQualified;
@@ -110,8 +116,8 @@ if($runtimeErrors.Count){throw "B8 GPU/runtime errors: $($runtimeErrors.Count)"}
 if($validFrames.Count -ne 9){throw "B8 expected 9 sequential screenshots; got $($validFrames.Count)"}
 if($coverage.Count -lt 10 -or $moving.Count -lt 3){throw 'B8 insufficient moving LOD evidence'}
 if($movingMissing -gt 0){throw "B8 horizon missing on $movingMissing samples"}
-if($tierErrors -gt 0 -or $seamErrors -gt 0 -or $atomicErrors -gt 0){
-    throw "B8 visible LOD seam or publication violation: tiers=$tierErrors seams=$seamErrors atomic=$atomicErrors"
+if($tierErrors -gt 0 -or $seamErrors -gt 0 -or $atomicErrors -gt 0 -or $badLodFrames -gt 0){
+    throw "B8 visible LOD seam or publication violation: tiers=$tierErrors seams=$seamErrors atomic=$atomicErrors bad_frames=$badLodFrames"
 }
 if($mixedPairs -lt 1){throw 'B8 never exercised an actual mixed LOD visible pair'}
 if($surfaceTiles -lt 10){throw "B8 insufficient SDF collider tiles: $surfaceTiles"}
