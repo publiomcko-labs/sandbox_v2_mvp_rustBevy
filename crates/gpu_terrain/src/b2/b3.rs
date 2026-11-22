@@ -183,6 +183,7 @@ struct StreamWorld {
     transition_target: HashMap<BlockCoord, LodSpec>,
     transition_pending: HashMap<BlockCoord, PendingUpgrade>,
     transition_commits: u64,
+    atomic_publication_errors: u64,
 }
 
 fn setup_b3_scene(
@@ -357,6 +358,27 @@ fn connected_ready_components(
     ready
 }
 
+/// B8 render-topology audit over PUBLISHED and GPU-ready blocks only.
+/// A mixed visible pair must be 2:1 and have a seam owned by the
+/// positive-coordinate block, or it can expose an actual raster crack.
+fn audit_visible_lod_seams(blocks:&HashMap<BlockCoord,ActiveBlock>)->(usize,usize,usize){
+    let mut pairs=0usize;
+    let mut invalid_tier=0usize;
+    let mut absent_seam=0usize;
+    for (&coord,block) in blocks {
+        if !block.visible{continue;}
+        for (axis,(dx,dy,dz)) in [(-1,0,0),(0,-1,0),(0,0,-1)].into_iter().enumerate() {
+            let other=BlockCoord{x:coord.x+dx,y:coord.y+dy,z:coord.z+dz};
+            let Some(neighbor)=blocks.get(&other).filter(|b|b.visible) else{continue;};
+            if block.spec.lod==neighbor.spec.lod {continue;}
+            pairs+=1;
+            if block.spec.lod.abs_diff(neighbor.spec.lod)>1 {invalid_tier+=1;}
+            if block.spec.seam.negative_face_mask&(1<<axis)==0 {absent_seam+=1;}
+        }
+    }
+    (pairs,invalid_tier,absent_seam)
+}
+
 fn stream_b3(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -453,6 +475,10 @@ fn stream_b3(
                 };
                 state.transition_target.remove(&coord);
                 if let Some(old) = state.blocks.remove(&coord) {
+                    if !old.visible {
+                        state.atomic_publication_errors+=1;
+                        error!(?coord,"B8 LOD revision swap without visible source");
+                    }
                     commands.entity(old.entity).despawn();
                     meshes.remove(old.mesh.id());
                 }
@@ -622,6 +648,12 @@ fn stream_b3(
             .values()
             .filter(|b| b.spec.seam.negative_face_mask != 0)
             .count();
+        let (visible_mixed_pairs,tier_errors,seam_ownership_errors)=
+            audit_visible_lod_seams(&state.blocks);
+        if tier_errors>0 || seam_ownership_errors>0 {
+            error!(tier_errors,seam_ownership_errors,
+                   "B8 published mixed LOD seam topology violation");
+        }
         info!(
             required,
             visible,
@@ -645,6 +677,10 @@ fn stream_b3(
             transition_pending = state.transition_pending.len(),
             transition_queued = state.transition_target.len(),
             transition_commits = state.transition_commits,
+            visible_mixed_pairs,
+            tier_errors,
+            seam_ownership_errors,
+            atomic_publication_errors=state.atomic_publication_errors,
             "B3 horizon coverage (130m, two vertical layers, GPU mesh ready)"
         );
         if required > visible {
