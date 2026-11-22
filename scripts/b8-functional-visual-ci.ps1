@@ -17,6 +17,7 @@ $env:SANDBOX_B3_RENDER_1080P='1'
 $env:SANDBOX_B3_BENCH_UNCAPPED='1'
 $env:SANDBOX_B8_CAPTURE_SEQUENCE='1'
 $env:SANDBOX_B8_WATER_PROBE='1'
+$env:SANDBOX_B8_GROUND_PROBE='1'
 $env:SANDBOX_B4_TEST_BRUSH='1'
 $env:SANDBOX_B4_SAVE_PATH=Join-Path $report 'b8-edits.txt'
 $env:SANDBOX_B5_SAVE_PATH=Join-Path $report 'b8-rocks.txt'
@@ -53,6 +54,7 @@ $auditedLodFrames=0
 $mixedPairs=0
 $surfaceTiles=0
 $waterQualified=$false
+$groundQualified=$false
 $probeCount=0
 $runtimeErrors=@()
 foreach($line in ($log -split "[\r\n]+")){
@@ -73,6 +75,9 @@ foreach($line in ($log -split "[\r\n]+")){
     }
     if($line -match 'B8 CPU SDF collider tile publication' -and $line -match 'surface_tiles=(\d+)'){
         $surfaceTiles=[Math]::Max($surfaceTiles,[int]$Matches[1])
+    }
+    if($line -match 'B8 Avian SDF ground collision probe' -and $line -match '\bqualified=true'){
+        $groundQualified=$true
     }
     if($line -match 'B8 Avian water buoyancy dynamic probe'){
         $probeCount++
@@ -106,6 +111,7 @@ $metrics=[ordered]@{
     sdf_surface_collider_tiles=$surfaceTiles;
     water_dynamic_probe_observed=($probeCount -gt 0);
     water_dynamic_probe_qualified=$waterQualified;
+    sdf_ground_contact_probe_qualified=$groundQualified;
     runtime_error_count=$runtimeErrors.Count;
 }
 $metrics|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $report 'B8_FUNCTIONAL_REPORT.json') -Encoding UTF8
@@ -122,4 +128,5 @@ if($tierErrors -gt 0 -or $seamErrors -gt 0 -or $atomicErrors -gt 0 -or $badLodFr
 if($mixedPairs -lt 1){throw 'B8 never exercised an actual mixed LOD visible pair'}
 if($surfaceTiles -lt 10){throw "B8 insufficient SDF collider tiles: $surfaceTiles"}
 if(-not $waterQualified){throw 'B8 Avian water probe did not demonstrate float-up and dense-down'}
+if(-not $groundQualified){throw 'B8 Avian dynamic rock did not rest on SDF trimesh collider'}
 Write-Host 'B8_FUNCTIONAL_VISUAL_EVIDENCE_PASS_WITH_MANUAL_TEMPORAL_HOLD'
