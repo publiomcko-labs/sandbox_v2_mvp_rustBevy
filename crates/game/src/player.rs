@@ -15,7 +15,7 @@ pub fn fly_camera(
     let automated = *B3_AUTOROUTE.get_or_init(|| {
         matches!(
             std::env::var("SANDBOX_STAGE").as_deref(),
-            Ok("B3" | "B4" | "B5" | "B6" | "B7")
+            Ok("B3" | "B4" | "B5" | "B6" | "B7" | "B8")
         ) && std::env::var("SANDBOX_B3_ROUTE").as_deref() == Ok("straight")
     });
     let mut velocity = Vec3::ZERO;
