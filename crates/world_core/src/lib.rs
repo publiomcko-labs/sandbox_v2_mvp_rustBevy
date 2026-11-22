@@ -3,6 +3,7 @@
 pub const BLOCK_EDGE_METERS: i64 = 16;
 
 pub mod density;
+pub mod collision;
 pub mod edits;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
