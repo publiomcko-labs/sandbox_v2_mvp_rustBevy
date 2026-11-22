@@ -42,8 +42,16 @@ try {
 }finally{
     if(-not $p.HasExited){Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue}
 }
+# Windows PowerShell may not populate Process.ExitCode after redirected
+# Start-Process; null is UNKNOWN, not a non-zero exit status. WaitForExit
+# before inspecting it and require Bevy's completed final screenshot marker
+# independently to corroborate normal completion.
+$p.WaitForExit()
 $p.Refresh()
+$exitCode=$p.ExitCode
+$exitCodeAvailable=$null -ne $exitCode
 $log=if(Test-Path $stderr){(Get-Content -LiteralPath $stderr -Raw)-replace '\x1b\[[0-9;]*m',''}else{''}
+$completedCapture=($log -match 'B2 visual CI: screenshot captured at' -and $log -match 'sequence_index=8')
 $ci=[Globalization.CultureInfo]::InvariantCulture
 $coverage=@()
 $tierErrors=0
@@ -95,7 +103,9 @@ $moving=@($coverage|Where-Object {
 })
 $movingMissing=@($moving|Where-Object {[int]$_.missing -gt 0}).Count
 $metrics=[ordered]@{
-    stage='B8';runner=$env:RUNNER_NAME;exit_code=$p.ExitCode;
+    stage='B8';runner=$env:RUNNER_NAME;exit_code=$exitCode;
+    exit_code_available=$exitCodeAvailable;
+    final_capture_confirmed=$completedCapture;
     elapsed_s=$watch.Elapsed.TotalSeconds;
     visual_frame_count=$validFrames.Count;
     visual_capture_times_s=@(12,16,20,24,28,32,36,40,44);
@@ -117,7 +127,9 @@ $metrics=[ordered]@{
 $metrics|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $report 'B8_FUNCTIONAL_REPORT.json') -Encoding UTF8
 $metrics|Format-List|Out-String|Write-Host
 if($runtimeErrors.Count){Write-Host ($runtimeErrors|Select-Object -First 5|Out-String)}
-if($p.ExitCode -ne 0){throw "B8 runtime exit $($p.ExitCode)"}
+if($exitCodeAvailable -and [int]$exitCode -ne 0){throw "B8 runtime exited with code $exitCode"}
+if(-not $completedCapture){throw 'B8 Bevy did not confirm the ninth successful screenshot before exit'}
+if(-not $exitCodeAvailable){Write-Host 'B8 Windows runner did not provide Process.ExitCode; successful ninth screenshot and clean stderr independently verified'}
 if($runtimeErrors.Count){throw "B8 GPU/runtime errors: $($runtimeErrors.Count)"}
 if($validFrames.Count -ne 9){throw "B8 expected 9 sequential screenshots; got $($validFrames.Count)"}
 if($coverage.Count -lt 10 -or $moving.Count -lt 3){throw 'B8 insufficient moving LOD evidence'}
