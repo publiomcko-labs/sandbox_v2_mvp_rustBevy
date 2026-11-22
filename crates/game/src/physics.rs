@@ -51,6 +51,7 @@ struct TerrainColliders {
     // None records that a tile is entirely solid/air and has no interface.
     cells: HashMap<(i32, i32, i32), (Option<Entity>, u64)>,
     total_triangle_updates: u64,
+    last_log_bucket: u32,
 }
 
 pub struct MvpPhysicsPlugin;
@@ -307,9 +308,13 @@ fn maintain_terrain_colliders(
             commands.entity(entity).despawn();
         }
     }
-    if time.elapsed_secs() > 0.0 && (time.elapsed_secs() as u32)%5==0 && rebuilt>0 {
-        info!(cached_tiles=state.cells.len(),triangle_updates=state.total_triangle_updates,
-             newly_built=rebuilt,"B8 CPU SDF collider tile publication");
+    let bucket=(time.elapsed_secs()/5.0) as u32;
+    if bucket>state.last_log_bucket {
+        state.last_log_bucket=bucket;
+        let surface_tiles=state.cells.values().filter(|(entity,_)|entity.is_some()).count();
+        info!(cached_tiles=state.cells.len(),surface_tiles,
+              triangle_updates=state.total_triangle_updates,
+              newly_built=rebuilt,"B8 CPU SDF collider tile publication");
     }
 }
 
