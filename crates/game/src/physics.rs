@@ -16,6 +16,13 @@ const ROCK_RADIUS: f32 = 0.45;
 const WATER_Y: f32 = 0.0;
 const ROCK_DENSITY: f32 = 2650.0;
 const WATER_DENSITY: f32 = 1000.0;
+
+#[derive(Component, Clone, Copy)]
+struct Buoyancy {radius:f32,density:f32}
+#[derive(Component, Clone, Copy)]
+enum BuoyancyProbe {Float,Dense}
+#[derive(Resource,Default)]
+struct B8ProbeReport{reported:bool}
 const COLLIDER_CELL_M: i32 = TILE_METERS;
 const COLLIDER_BUILDS_PER_FRAME: usize = 24;
 const COLLIDER_RADIUS_M: f32 = 24.0;
@@ -52,9 +59,10 @@ impl Plugin for MvpPhysicsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RockWorld>()
             .init_resource::<TerrainColliders>()
-            .add_systems(Startup, setup_rocks_water)
-            .add_systems(Update, (stream_rocks, maintain_terrain_colliders, save_rock_states))
-            .add_systems(FixedUpdate, buoyancy_for_rocks);
+            .init_resource::<B8ProbeReport>()
+            .add_systems(Startup, (setup_rocks_water,spawn_b8_buoyancy_probes))
+            .add_systems(Update, (stream_rocks, maintain_terrain_colliders, save_rock_states, observe_b8_buoyancy_probes))
+            .add_systems(FixedUpdate, buoyancy_for_bodies);
     }
 }
 
@@ -173,6 +181,7 @@ fn stream_rocks(
             commands.entity(entity).insert((
                 RigidBody::Dynamic,
                 Collider::sphere(ROCK_RADIUS),
+                Buoyancy{radius:ROCK_RADIUS,density:ROCK_DENSITY},
                 Friction::new(0.8),
                 Restitution::new(0.05),
                 LinearVelocity(rocks.states.get(id).map_or(Vec3::ZERO, |s| s.velocity)),
@@ -183,6 +192,7 @@ fn stream_rocks(
             commands.entity(entity)
                 .remove::<RigidBody>()
                 .remove::<Collider>()
+                .remove::<Buoyancy>()
                 .remove::<LinearVelocity>();
         }
         if horizontal > 182.0 {
@@ -315,22 +325,71 @@ fn submerged_fraction(center_y:f32,radius:f32,surface_y:f32)->f32 {
     let sphere=(4.0/3.0)*std::f32::consts::PI*radius*radius*radius;
     (volume_cap/sphere).clamp(0.0,1.0)
 }
-fn buoyancy_acceleration(center_y:f32)->f32 {
-    9.81 * WATER_DENSITY / ROCK_DENSITY * submerged_fraction(center_y,ROCK_RADIUS,WATER_Y)
+fn buoyancy_acceleration(center_y:f32,radius:f32,density:f32)->f32 {
+    9.81*WATER_DENSITY/density*submerged_fraction(center_y,radius,WATER_Y)
 }
-fn buoyancy_for_rocks(
+fn buoyancy_for_bodies(
     time: Res<Time<Fixed>>,
-    mut bodies: Query<(&Transform, &mut LinearVelocity), With<RockId>>,
+    mut bodies: Query<(&Transform, &mut LinearVelocity, &Buoyancy)>,
 ) {
     let dt=time.delta_secs();
-    for (transform,mut velocity) in &mut bodies {
-        let submerged=submerged_fraction(transform.translation.y,ROCK_RADIUS,WATER_Y);
+    for (transform,mut velocity,fluid) in &mut bodies {
+        let submerged=submerged_fraction(transform.translation.y,fluid.radius,WATER_Y);
         if submerged<=0.0 { continue; }
-        velocity.0.y+=buoyancy_acceleration(transform.translation.y)*dt;
-        // Water drag opposes existing motion relative to a stationary ocean.
+        velocity.0.y+=buoyancy_acceleration(transform.translation.y,fluid.radius,fluid.density)*dt;
+        // Linear water drag opposes motion in every axis, including drift.
         velocity.0*=1.0/(1.0+1.5*submerged*dt);
     }
 }
+
+/// Explicit diagnostic: two actual Avian dynamic rigid bodies submerged in
+/// ocean water. One has lower density than water, one rock density.
+fn spawn_b8_buoyancy_probes(
+    mut commands:Commands,
+    mut meshes:ResMut<Assets<Mesh>>,
+    mut materials:ResMut<Assets<StandardMaterial>>,
+) {
+    if std::env::var("SANDBOX_B8_WATER_PROBE").as_deref()!=Ok("1"){return;}
+    let mesh=meshes.add(Sphere::new(0.4));
+    for (marker,x,density,color) in [
+        (BuoyancyProbe::Float,-4.0,450.0,Color::srgb(0.9,0.8,0.24)),
+        (BuoyancyProbe::Dense,-2.0,ROCK_DENSITY,Color::srgb(0.45,0.45,0.45)),
+    ] {
+        commands.spawn((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(materials.add(StandardMaterial{base_color:color,..default()})),
+            Transform::from_xyz(x,-1.2,4.0),
+            RigidBody::Dynamic,
+            LinearVelocity::ZERO,
+            Buoyancy{radius:ROCK_RADIUS,density},
+            marker,
+            Name::new("B8 immersed Avian water probe"),
+        ));
+    }
+}
+fn observe_b8_buoyancy_probes(
+    time:Res<Time>,
+    probes:Query<(&BuoyancyProbe,&LinearVelocity)>,
+    mut report:ResMut<B8ProbeReport>,
+) {
+    if report.reported || time.elapsed_secs()<0.45 {return;}
+    let mut floating=None;
+    let mut sinking=None;
+    for (kind,v) in &probes {
+        match kind {
+            BuoyancyProbe::Float=>floating=Some(v.0.y),
+            BuoyancyProbe::Dense=>sinking=Some(v.0.y),
+        }
+    }
+    if let (Some(up),Some(down))=(floating,sinking) {
+        report.reported=true;
+        let qualified=up>0.1 && down < -0.1;
+        info!(floating_velocity_y=up,dense_velocity_y=down,
+              qualified,"B8 Avian water buoyancy dynamic probe");
+        if !qualified { error!("B8 dynamic fluid behavior failed to demonstrate buoyancy and sinking"); }
+    }
+}
+
 fn save_rock_states(
     time: Res<Time>,
     bodies: Query<(&RockId,&Transform,Option<&LinearVelocity>)>,
@@ -359,7 +418,8 @@ mod tests {
         assert!((0.0..=1.0).contains(&submerged_fraction(-0.499,0.5,0.0)));
         assert!(submerged_fraction(-0.499,0.5,0.0) < 1.0);
         assert!((submerged_fraction(0.0,0.5,0.0)-0.5).abs()<1e-6);
-        assert!(buoyancy_acceleration(-1.0)<9.81);
+        assert!(buoyancy_acceleration(-1.0,ROCK_RADIUS,ROCK_DENSITY)<9.81);
+        assert!(buoyancy_acceleration(-1.0,ROCK_RADIUS,450.0)>9.81);
     }
     #[test]
     fn seed_based_rock_position_and_save_reopen() {
