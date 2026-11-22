@@ -6,7 +6,8 @@ use bevy::prelude::*;
 use sandbox_gpu_terrain::b2::b3::B4EditState;
 use sandbox_world_core::{
     BlockCoord,
-    density::{density_half, hash2, terrain_height_half},
+    collision::{surface_from_world, TILE_METERS},
+    density::{hash2, terrain_height_half},
 };
 use std::{collections::{HashMap, HashSet}, fs, path::PathBuf};
 
@@ -15,7 +16,8 @@ const ROCK_RADIUS: f32 = 0.45;
 const WATER_Y: f32 = 0.0;
 const ROCK_DENSITY: f32 = 2650.0;
 const WATER_DENSITY: f32 = 1000.0;
-const COLLIDER_CELL_M: i32 = 4;
+const COLLIDER_CELL_M: i32 = TILE_METERS;
+const COLLIDER_BUILDS_PER_FRAME: usize = 24;
 const COLLIDER_RADIUS_M: f32 = 24.0;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Component)]
@@ -39,7 +41,9 @@ struct RockWorld {
 
 #[derive(Resource, Default)]
 struct TerrainColliders {
-    cells: HashMap<(i32, i32, i32), (Entity, u64)>,
+    // None records that a tile is entirely solid/air and has no interface.
+    cells: HashMap<(i32, i32, i32), (Option<Entity>, u64)>,
+    total_triangle_updates: u64,
 }
 
 pub struct MvpPhysicsPlugin;
@@ -219,49 +223,83 @@ fn stream_rocks(
     }
 }
 
+/// Approximate the actual renderer's edited SDF zero-set with one-meter
+/// marching-tetrahedra triangles. A cave remains hollow; a slope is NOT a
+/// four-meter stair-step. Revisions replace an existing collider in place.
 fn maintain_terrain_colliders(
     mut commands: Commands,
     camera: Query<&Transform, With<Camera3d>>,
     editor: Option<Res<B4EditState>>,
     mut state: ResMut<TerrainColliders>,
+    time: Res<Time>,
 ) {
     let Some(cam) = camera.iter().next() else { return; };
     let x=(cam.translation.x / COLLIDER_CELL_M as f32).floor() as i32;
     let z=(cam.translation.z / COLLIDER_CELL_M as f32).floor() as i32;
     let mut required=HashSet::new();
+    let mut changed=Vec::new();
+    let empty_world=sandbox_world_core::edits::WorldEdits::default();
+    let world=editor.as_ref().map_or(&empty_world,|ed|&ed.world);
     for gz in z-6..=z+6 {
         for gx in x-6..=x+6 {
             let px=gx*COLLIDER_CELL_M+COLLIDER_CELL_M/2;
             let pz=gz*COLLIDER_CELL_M+COLLIDER_CELL_M/2;
-            if Vec2::new(px as f32-cam.translation.x,pz as f32-cam.translation.z).length()>COLLIDER_RADIUS_M { continue; }
+            let dx=px as f32-cam.translation.x;
+            let dz=pz as f32-cam.translation.z;
+            if Vec2::new(dx,dz).length()>COLLIDER_RADIUS_M { continue; }
             for gy in -5..=4 {
                 let py=gy*COLLIDER_CELL_M+COLLIDER_CELL_M/2;
                 let coord=BlockCoord::from_meter_grid(px as i64, py as i64, pz as i64);
-                let revision=editor.as_ref().map_or(0, |ed| ed.world.revision(coord));
+                let revision=world.revision(coord);
                 let key=(gx,gy,gz);
-                let half=[px*2,py*2,pz*2];
-                let density=editor.as_ref().map_or_else(
-                    || density_half(SEED,half[0],half[1],half[2]),
-                    |ed| ed.world.sample(SEED,half),
-                );
-                if density>=0.0 { continue; }
                 required.insert(key);
-                if state.cells.get(&key).is_some_and(|(_,rev)| *rev==revision) { continue; }
-                if let Some((old,_))=state.cells.remove(&key) { commands.entity(old).despawn(); }
-                let entity=commands.spawn((
-                    RigidBody::Static,
-                    Collider::cuboid(COLLIDER_CELL_M as f32,COLLIDER_CELL_M as f32,COLLIDER_CELL_M as f32),
-                    Transform::from_xyz(px as f32,py as f32,pz as f32),
-                )).id();
-                state.cells.insert(key,(entity,revision));
+                if state.cells.get(&key).is_some_and(|(_,rev)|*rev==revision){continue;}
+                let dy=py as f32-cam.translation.y;
+                changed.push((key,revision,dx*dx+dy*dy+dz*dz));
             }
         }
     }
-    let expired:Vec<_>=state.cells.keys().copied().filter(|key| !required.contains(key)).collect();
+    // Near-first streaming avoids starting rock simulation above missing
+    // terrain. Old edited colliders survive until their replacement is ready.
+    changed.sort_by(|a,b|a.2.total_cmp(&b.2));
+    let mut rebuilt=0usize;
+    for (key,revision,_) in changed.into_iter().take(COLLIDER_BUILDS_PER_FRAME) {
+        let origin=[key.0*COLLIDER_CELL_M,key.1*COLLIDER_CELL_M,key.2*COLLIDER_CELL_M];
+        let surface=surface_from_world(SEED,origin,world);
+        let previous=state.cells.remove(&key).and_then(|(entity,_)|entity);
+        let entity=if surface.is_empty() {
+            if let Some(old)=previous {commands.entity(old).despawn();}
+            None
+        } else {
+            let vertices=surface.vertices.into_iter().map(Vec3::from_array).collect();
+            let collider=Collider::trimesh(vertices,surface.triangles);
+            let current=if let Some(old)=previous {
+                // In-place update; never introduce a no-collider frame.
+                commands.entity(old).insert(collider);
+                old
+            } else {
+                commands.spawn((
+                    RigidBody::Static,
+                    collider,
+                    Transform::from_xyz(origin[0] as f32,origin[1] as f32,origin[2] as f32),
+                    Name::new("B8 edited SDF surface collider"),
+                )).id()
+            };
+            Some(current)
+        };
+        state.cells.insert(key,(entity,revision));
+        rebuilt+=1;
+    }
+    state.total_triangle_updates+=rebuilt as u64;
+    let expired:Vec<_>=state.cells.keys().copied().filter(|key|!required.contains(key)).collect();
     for key in expired {
-        if let Some((entity,_))=state.cells.remove(&key) {
+        if let Some((Some(entity),_))=state.cells.remove(&key) {
             commands.entity(entity).despawn();
         }
+    }
+    if time.elapsed_secs() > 0.0 && (time.elapsed_secs() as u32)%5==0 && rebuilt>0 {
+        info!(cached_tiles=state.cells.len(),triangle_updates=state.total_triangle_updates,
+             newly_built=rebuilt,"B8 CPU SDF collider tile publication");
     }
 }
 
