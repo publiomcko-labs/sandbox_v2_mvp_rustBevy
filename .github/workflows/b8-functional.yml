@@ -35,3 +35,70 @@ jobs:
           cargo check --locked -p sandbox-game
           cargo test --locked -p sandbox-streaming
           cargo test --locked -p sandbox-density-gpu-validation b4_density_shader_parses_and_validates
+  release:
+    needs: preflight
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      # Reuse cached dependencies in the successful B6 Release toolchain.
+      CARGO_TARGET_DIR: ${{ github.workspace }}\\..\\_b6_cargo_target
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native Rust 1.100 MSVC
+        shell: cmd
+        env:
+          CARGO_HOME: ${{ runner.temp }}\\b0-cargo
+          RUSTUP_HOME: ${{ runner.temp }}\\b0-rustup
+        run: |
+          if not exist "%CARGO_HOME%\\bin\\rustup.exe" (
+            curl.exe --proto =https --tlsv1.2 --retry 3 -fL -o "%RUNNER_TEMP%\\rustup-init.exe" https://win.rustup.rs/x86_64
+            if errorlevel 1 exit /b 1
+            "%RUNNER_TEMP%\\rustup-init.exe" -y --no-modify-path --default-toolchain none
+            if errorlevel 1 exit /b 1
+          )
+          "%CARGO_HOME%\\bin\\rustup.exe" toolchain install 1.100.0 --profile minimal --component rustfmt --no-self-update
+          if errorlevel 1 exit /b 1
+          echo %CARGO_HOME%\\bin>>"%GITHUB_PATH%"
+          echo CARGO_HOME=%CARGO_HOME%>>"%GITHUB_ENV%"
+          echo RUSTUP_HOME=%RUSTUP_HOME%>>"%GITHUB_ENV%"
+      - name: Compile edited SDF trimesh colliders with Avian
+        shell: cmd
+        run: cargo +1.100.0 check --locked -p sandbox-game
+      - name: Build B8 functional visual Release
+        shell: cmd
+        run: cargo +1.100.0 build --release --locked -p sandbox-game
+      - name: Package executable and shaders
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force dist/b8/assets | Out-Null
+          Copy-Item "$env:CARGO_TARGET_DIR/release/sandbox-game.exe" dist/b8/sandbox-game.exe
+          Copy-Item assets/shaders dist/b8/assets/shaders -Recurse -Force
+          if (-not (Test-Path dist/b8/assets/shaders/sdf_density_b4.wgsl)) { throw 'Missing B8 edited SDF shader' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: b8-functional-release
+          path: dist/b8/
+          if-no-files-found: error
+  gpu-visual:
+    needs: release
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: b8-functional-release
+          path: b8-runtime
+      - name: Verify live LOD seams, SDF surface colliders, water forces and nine visual captures
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b8-functional-visual-ci.ps1"
+      - name: Publish complete diagnostic evidence on success or failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b8-functional-visual-evidence
+          path: b8-functional-report/
+          if-no-files-found: warn
