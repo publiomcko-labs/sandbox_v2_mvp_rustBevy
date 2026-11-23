@@ -1,0 +1,106 @@
+name: B9 creative fly camera and automatic visual route
+on:
+  push:
+    branches:
+      - 'feat/b9-*'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: b9-creative-video
+  cancel-in-progress: true
+jobs:
+  release:
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 110
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      CARGO_TARGET_DIR: ${{ github.workspace }}\\..\\_b6_cargo_target
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native Rust 1.100 MSVC
+        shell: cmd
+        env:
+          CARGO_HOME: ${{ runner.temp }}\\b0-cargo
+          RUSTUP_HOME: ${{ runner.temp }}\\b0-rustup
+        run: |
+          if not exist "%CARGO_HOME%\\bin\\rustup.exe" (
+            curl.exe --proto =https --tlsv1.2 --retry 3 -fL -o "%RUNNER_TEMP%\\rustup-init.exe" https://win.rustup.rs/x86_64
+            if errorlevel 1 exit /b 1
+            "%RUNNER_TEMP%\\rustup-init.exe" -y --no-modify-path --default-toolchain none
+            if errorlevel 1 exit /b 1
+          )
+          "%CARGO_HOME%\\bin\\rustup.exe" toolchain install 1.100.0 --profile minimal --component rustfmt --no-self-update
+          if errorlevel 1 exit /b 1
+          echo %CARGO_HOME%\\bin>>"%GITHUB_PATH%"
+          echo CARGO_HOME=%CARGO_HOME%>>"%GITHUB_ENV%"
+          echo RUSTUP_HOME=%RUSTUP_HOME%>>"%GITHUB_ENV%"
+      - name: Check Bevy creative camera and mouse API
+        shell: cmd
+        run: cargo +1.100.0 check --locked -p sandbox-game
+      - name: Compile Windows Vulkan B9 Release
+        shell: cmd
+        run: cargo +1.100.0 build --locked --release -p sandbox-game
+      - name: Package B9 executable and shaders
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force dist/b9/assets | Out-Null
+          Copy-Item "$env:CARGO_TARGET_DIR/release/sandbox-game.exe" dist/b9/sandbox-game.exe
+          Copy-Item assets/shaders dist/b9/assets/shaders -Recurse -Force
+          if (-not (Test-Path dist/b9/assets/shaders/sdf_density_b4.wgsl)) {throw 'Edited SDF shader missing'}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: b9-creative-windows-release
+          path: dist/b9/
+          if-no-files-found: error
+  route-smoke:
+    needs: release
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: b9-creative-windows-release
+          path: b9-runtime/
+      - name: Verify scriptable B9 camera route and GPU screenshot
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $env:SANDBOX_STAGE='B9'
+          $env:SANDBOX_B3_HEADLESS='1'
+          $env:SANDBOX_B9_TEST_ROUTE='survey'
+          $env:SANDBOX_B3_MIXED_LOD='1'
+          $env:SANDBOX_B3_RENDER_1080P='1'
+          $env:SANDBOX_B4_SAVE_PATH=(Join-Path (Get-Location).Path 'b9-edits.txt')
+          $env:SANDBOX_B5_SAVE_PATH=(Join-Path (Get-Location).Path 'b9-rocks.txt')
+          $env:SANDBOX_B2_CAPTURE_PATH=(Join-Path (Get-Location).Path 'b9-route-smoke.png')
+          $env:SANDBOX_B3_CAPTURE_AFTER_SECONDS='19'
+          $env:WGPU_BACKEND='vulkan'
+          $env:RUST_LOG='info,sandbox_gpu_terrain::b2=warn,sandbox_gpu_terrain::b2::b3=info'
+          $runtime=Join-Path (Get-Location).Path 'b9-runtime'
+          $out=Join-Path (Get-Location).Path 'b9-route.stdout.log'
+          $err=Join-Path (Get-Location).Path 'b9-route.stderr.log'
+          $p=Start-Process -FilePath (Join-Path $runtime 'sandbox-game.exe') -WorkingDirectory $runtime -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+          if (-not $p.WaitForExit(70000)) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            throw 'B9 route smoke timed out'
+          }
+          $logs=Get-Content $err -Raw
+          if ($logs -notmatch 'B9 route segment' -or $logs -notmatch 'east-18mps') {throw 'B9 did not start auto route'}
+          if ($logs -notmatch 'B3 horizon coverage') {throw 'B9 terrain did not publish coverage diagnostics'}
+          if (-not (Test-Path $env:SANDBOX_B2_CAPTURE_PATH)) {throw 'B9 GPU screenshot not captured'}
+          if ((Get-Item $env:SANDBOX_B2_CAPTURE_PATH).Length -lt 5000) {throw 'B9 screenshot invalid'}
+          if ($logs -match '(?i)\bERROR\b|Validation Error|panicked') {throw 'B9 GPU runtime recorded errors'}
+          Write-Host 'B9_AUTOROUTE_VULKAN_SCREENSHOT_PASS'
+      - name: Publish B9 route evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b9-creative-route-smoke
+          path: |
+            b9-route*.log
+            b9-route*.png
+          if-no-files-found: warn
