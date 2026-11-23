@@ -3,6 +3,7 @@ mod player;
 mod physics;
 mod visual_capture;
 mod visual_far;
+mod visual_raster;
 
 use avian3d::prelude::PhysicsPlugins;
 use bevy::{
@@ -97,5 +98,6 @@ fn main() {
         app.add_plugins(visual_far::B11FarVisualCoveragePlugin);
     }
     visual_capture::configure(&mut app);
+    visual_raster::configure(&mut app);
     app.add_systems(Update, player::fly_camera).run();
 }
