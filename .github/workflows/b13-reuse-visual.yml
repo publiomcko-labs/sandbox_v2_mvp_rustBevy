@@ -1,0 +1,42 @@
+name: B13 visual validation - reuse approved Release
+on:
+  push:
+    branches:
+      - 'ci/b13-visual-reuse-20261123'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: b13-smoke-reuse
+  cancel-in-progress: true
+jobs:
+  visual-smoke-reuse:
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download B13 Release produced by already successful build
+        uses: actions/download-artifact@v4
+        with:
+          name: b13-frustum-physics-windows-release
+          path: b13-runtime/
+          repository: ${{ github.repository }}
+          run-id: 45244971799
+          github-token: ${{ github.token }}
+      - name: Verify original executable and shaders are present
+        shell: cmd
+        run: |
+          if not exist "b13-runtime\\sandbox-game.exe" exit /b 1
+          if not exist "b13-runtime\\assets\\shaders\\sdf_density_b4.wgsl" exit /b 1
+          echo Reusing preflight and Release from run 45244971799, SHA 34e3e3b394243d35009c83296fe79a8f247798f0
+      - name: Run corrected PowerShell smoke on original Windows Vulkan Release
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b13-visibility-physics-smoke.ps1"
+      - name: Publish revised diagnostics and two 1080p Vulkan screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b13-reused-release-visual-evidence
+          path: b13-evidence/
+          if-no-files-found: warn

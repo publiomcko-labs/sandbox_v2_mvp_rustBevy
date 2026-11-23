@@ -27,7 +27,9 @@ if (-not $p.WaitForExit(90000)) {
 $log=(Get-Content $stderr -Raw) -replace '\x1b\[[0-9;]*m',''
 $images=@(Get-ChildItem $report -Filter 'b13-??.png' -File)
 $fields=[ordered]@{
-    run='B13'
+    run='B13-REUSE'
+    source_workflow_run_id=45244971799
+    source_commit='34e3e3b394243d35009c83296fe79a8f247798f0'
     images=$images.Count
     frustum_protection=($log -match 'B13 GPU mesh visibility: frustum culling disabled')
     physics_readiness_guard=($log -match 'B13 physics rock/collider residency guard')
@@ -40,7 +42,7 @@ $fields=[ordered]@{
 $fields|ConvertTo-Json|Set-Content (Join-Path $report 'B13_SMOKE.json') -Encoding UTF8
 $fields|Format-List|Out-String|Write-Host
 if($images.Count -ne 2){throw "B13 expected 2 images, received $($images.Count)"}
-if(($images|Where-Object{$_.Length -lt 3000}).Count -gt 0){throw 'B13 screenshot invalid'}
+if(@($images | Where-Object { $_.Length -lt 3000 }).Count -gt 0){throw 'B13 screenshot invalid'}
 if(-not $fields.second_capture){throw 'B13 second capture not confirmed'}
 if(-not $fields.frustum_protection){throw 'B13 GPU frustum protection not activated'}
 if(-not $fields.physics_readiness_guard){throw 'B13 rock collision readiness diagnostics missing'}
