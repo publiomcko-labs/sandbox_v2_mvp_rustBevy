@@ -199,8 +199,33 @@ struct PendingB2(Vec<BuildSdfMesh>);
 
 /// Density buffers allocated once per block and retained, like the Bevy mesh
 /// slabs. No density, vertex or triangle readback occurs in the runtime path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct B12GpuMeshSlot {
+    vertex_buffer: BufferId,
+    index_buffer: BufferId,
+    vertex_start: u32,
+    vertex_end: u32,
+    index_start: u32,
+    index_end: u32,
+}
+fn b12_current_slot(allocator: &MeshAllocator, mesh: AssetId<Mesh>) -> Option<B12GpuMeshSlot> {
+    let vertices = allocator.mesh_vertex_slice(&mesh)?;
+    let indices = allocator.mesh_index_slice(&mesh)?;
+    Some(B12GpuMeshSlot {
+        vertex_buffer: vertices.buffer.id(),
+        index_buffer: indices.buffer.id(),
+        vertex_start: vertices.range.start,
+        vertex_end: vertices.range.end,
+        index_start: indices.range.start,
+        index_end: indices.range.end,
+    })
+}
+struct B12ResidentMesh {
+    _density: Buffer,
+    slot: B12GpuMeshSlot,
+}
 #[derive(Resource, Default)]
-struct B2ResidentBuffers(HashMap<AssetId<Mesh>, Buffer>);
+struct B2ResidentBuffers(HashMap<AssetId<Mesh>, B12ResidentMesh>);
 
 #[derive(Resource)]
 struct B2Pipelines {
@@ -313,6 +338,7 @@ fn prepare_b2(
     commands: Query<&BuildSdfMesh>,
     mut pending: ResMut<PendingB2>,
     mut resident: ResMut<B2ResidentBuffers>,
+    allocator: Res<MeshAllocator>,
     cache: Res<PipelineCache>,
     pipelines: Res<B2Pipelines>,
     b3_ready: Option<Res<b3::B3ReadySet>>,
@@ -334,6 +360,22 @@ fn prepare_b2(
     if b3_ready.is_none() || *frame % 16 == 0 {
         let active: HashSet<_> = commands.iter().map(|job| job.handle.id()).collect();
         resident.0.retain(|mesh_id, _| active.contains(mesh_id));
+    }
+    // Unlike ordinary CPU-uploaded meshes, these slabs are written by GPU
+    // compute only once. If MeshAllocator relocates a live allocation, the
+    // new slab can contain missing or stale geometry while the MainWorld still
+    // reports GPU-ready. Validate the live GPU buffer *identity and offsets*
+    // each frame and re-emit extraction on the new allocation.
+    if b3_ready.is_some() {
+        let moved: Vec<_> = resident.0.iter()
+            .filter_map(|(&mesh_id, resident_mesh)| {
+                let live = b12_current_slot(&allocator, mesh_id)?;
+                (live != resident_mesh.slot).then_some(mesh_id)
+            }).collect();
+        for mesh_id in moved {
+            resident.0.remove(&mesh_id);
+            warn!(?mesh_id,"B12 GPU mesh allocator relocation detected; rebuilding surface");
+        }
     }
     pending.0.clear();
     let quota = if b3_ready.is_some() { 5 } else { usize::MAX };
@@ -520,7 +562,15 @@ fn compute_b2(
         // The render graph executes these stages before the camera draw.
         // Preserve each buffer for the lifetime of the mesh; no per-frame
         // uploads or runtime readback.
-        resident.0.insert(id, density_buffer);
+        let slot = B12GpuMeshSlot {
+            vertex_buffer: vslice.buffer.id(),
+            index_buffer: islice.buffer.id(),
+            vertex_start: vslice.range.start,
+            vertex_end: vslice.range.end,
+            index_start: islice.range.start,
+            index_end: islice.range.end,
+        };
+        resident.0.insert(id, B12ResidentMesh { _density: density_buffer, slot });
         if let Some(ref signal) = b3_ready {
             // The draw command uses this mesh only from a future frame
             // after these three compute dispatches have been submitted.
