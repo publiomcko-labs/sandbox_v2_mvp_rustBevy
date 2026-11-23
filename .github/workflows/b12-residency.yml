@@ -1,0 +1,115 @@
+name: B12 far-field visual continuity Windows Vulkan
+on:
+  push:
+    branches:
+      - 'fix/b12-*'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: b12-far-coverage
+  cancel-in-progress: true
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux Bevy compile prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev
+      - name: Rust 1.100
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --no-self-update
+          rustup default 1.100.0
+      - name: Compile B12 visual coverage integration
+        run: cargo check --locked -p sandbox-game
+  release:
+    needs: preflight
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 110
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      CARGO_TARGET_DIR: ${{ github.workspace }}\\..\\_b6_cargo_target
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native MSVC Rust 1.100
+        shell: cmd
+        env:
+          CARGO_HOME: ${{ runner.temp }}\\b0-cargo
+          RUSTUP_HOME: ${{ runner.temp }}\\b0-rustup
+        run: |
+          if not exist "%CARGO_HOME%\\bin\\rustup.exe" (
+            curl.exe --proto =https --tlsv1.2 --retry 3 -fL -o "%RUNNER_TEMP%\\rustup-init.exe" https://win.rustup.rs/x86_64
+            if errorlevel 1 exit /b 1
+            "%RUNNER_TEMP%\\rustup-init.exe" -y --no-modify-path --default-toolchain none
+            if errorlevel 1 exit /b 1
+          )
+          "%CARGO_HOME%\\bin\\rustup.exe" toolchain install 1.100.0 --profile minimal --component rustfmt --no-self-update
+          if errorlevel 1 exit /b 1
+          echo %CARGO_HOME%\\bin>>"%GITHUB_PATH%"
+          echo CARGO_HOME=%CARGO_HOME%>>"%GITHUB_ENV%"
+          echo RUSTUP_HOME=%RUSTUP_HOME%>>"%GITHUB_ENV%"
+      - name: Build B12 corrected Windows Release
+        shell: cmd
+        run: cargo +1.100.0 build --release --locked -p sandbox-game
+      - name: Bundle B12 runtime and shaders
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force dist/b12/assets | Out-Null
+          Copy-Item "$env:CARGO_TARGET_DIR/release/sandbox-game.exe" dist/b12/sandbox-game.exe
+          Copy-Item assets/shaders dist/b12/assets/shaders -Recurse -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: b12-corrected-windows-release
+          path: dist/b12/
+          if-no-files-found: error
+  visual-smoke:
+    needs: release
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: b12-corrected-windows-release
+          path: b12-runtime/
+      - name: Capture 25s and 57s with distant terrain active
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force b12-evidence | Out-Null
+          $env:SANDBOX_STAGE='B11'
+          $env:SANDBOX_B3_HEADLESS='1'
+          $env:SANDBOX_B3_ROUTE='straight'
+          $env:SANDBOX_B3_MIXED_LOD='1'
+          $env:SANDBOX_B3_RENDER_1080P='1'
+          $env:SANDBOX_B10_CAPTURE_TIMES='25,57'
+          $env:SANDBOX_B4_SAVE_PATH=(Join-Path (Get-Location).Path 'b12-evidence/b12-edits.txt')
+          $env:SANDBOX_B5_SAVE_PATH=(Join-Path (Get-Location).Path 'b12-evidence/b12-rocks.txt')
+          $env:SANDBOX_B2_CAPTURE_PATH=(Join-Path (Get-Location).Path 'b12-evidence/b12.png')
+          $env:WGPU_BACKEND='vulkan'
+          $env:RUST_LOG='info,sandbox_gpu_terrain::b2=warn,sandbox_gpu_terrain::b2::b3=info'
+          $app=Join-Path (Get-Location).Path 'b12-runtime'
+          $p=Start-Process -FilePath (Join-Path $app 'sandbox-game.exe') -WorkingDirectory $app -PassThru -RedirectStandardError 'b12-evidence/stderr.log' -RedirectStandardOutput 'b12-evidence/stdout.log'
+          if(-not $p.WaitForExit(85000)){Stop-Process -Id $p.Id -Force;throw 'B12 screenshot deadline exceeded'}
+          $l=Get-Content 'b12-evidence/stderr.log' -Raw
+          if ($l -notmatch 'B11 far field coverage built'){throw 'Far coverage was not created'}
+          if ($l -notmatch 'sequence_index=1.*B2 visual CI: screenshot captured at'){throw 'B12 final screenshot not confirmed'}
+          if (@(Get-ChildItem 'b12-evidence/b12-??.png').Count -ne 2){throw 'B12 expected 2 images'}
+          if ($l -match '(?i)\bERROR\b|Validation Error|panicked'){throw 'B12 GPU error'}
+          Write-Host 'B12_FAR_FIELD_VULKAN_CAPTURE_PASS'
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b12-far-field-visual-evidence
+          path: b12-evidence/
+          if-no-files-found: warn
