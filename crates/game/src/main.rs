@@ -2,6 +2,7 @@
 mod player;
 mod physics;
 mod visual_capture;
+mod visual_far;
 
 use avian3d::prelude::PhysicsPlugins;
 use bevy::{
@@ -21,7 +22,7 @@ use std::time::Duration;
 fn main() {
     let stage = std::env::var("SANDBOX_STAGE").unwrap_or_default();
     let b0 = stage.eq_ignore_ascii_case("B0");
-    let b3 = ["B3", "B4", "B5", "B6", "B7", "B8", "B9", "B9"].iter().any(|s| stage.eq_ignore_ascii_case(s));
+    let b3 = ["B3", "B4", "B5", "B6", "B7", "B8", "B9", "B11", "B11", "B9"].iter().any(|s| stage.eq_ignore_ascii_case(s));
     let headless = !b0
         && (std::env::var("SANDBOX_B2_HEADLESS").as_deref() == Ok("1")
             || std::env::var("SANDBOX_B3_HEADLESS").as_deref() == Ok("1"));
@@ -89,6 +90,11 @@ fn main() {
     }
     if ["B5", "B6", "B7", "B8"].iter().any(|s| stage.eq_ignore_ascii_case(s)) {
         app.add_plugins(physics::MvpPhysicsPlugin);
+    }
+    if stage.eq_ignore_ascii_case("B11")
+        || std::env::var("SANDBOX_B11_FAR_FIELD").as_deref() == Ok("1")
+    {
+        app.add_plugins(visual_far::B11FarVisualCoveragePlugin);
     }
     visual_capture::configure(&mut app);
     app.add_systems(Update, player::fly_camera).run();

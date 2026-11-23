@@ -70,7 +70,7 @@ pub fn fly_camera(
     let automated_b3 = *B3_AUTOROUTE.get_or_init(|| {
         matches!(
             std::env::var("SANDBOX_STAGE").as_deref(),
-            Ok("B3" | "B4" | "B5" | "B6" | "B7" | "B8")
+            Ok("B3" | "B4" | "B5" | "B6" | "B7" | "B8" | "B11")
         ) && std::env::var("SANDBOX_B3_ROUTE").as_deref() == Ok("straight")
     });
     static B9_SURVEY: OnceLock<bool> = OnceLock::new();
@@ -80,7 +80,7 @@ pub fn fly_camera(
     });
     static B9_CREATIVE: OnceLock<bool> = OnceLock::new();
     let creative = *B9_CREATIVE.get_or_init(|| {
-        std::env::var("SANDBOX_STAGE").as_deref() == Ok("B9")
+        matches!(std::env::var("SANDBOX_STAGE").as_deref(),Ok("B9" | "B11"))
             || std::env::var("SANDBOX_B9_CREATIVE").as_deref() == Ok("1")
     });
     let elapsed = time.elapsed_secs();

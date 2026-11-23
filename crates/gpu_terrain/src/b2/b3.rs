@@ -197,7 +197,7 @@ fn setup_b3_scene(
 ) {
     state.baseline_scheduler = std::env::var("SANDBOX_B3_SCHEDULER").as_deref() == Ok("baseline");
     let stage = std::env::var("SANDBOX_STAGE").unwrap_or_default();
-    editor.enabled = matches!(stage.as_str(), "B4" | "B5" | "B6" | "B7" | "B8" | "B9")
+    editor.enabled = matches!(stage.as_str(), "B4" | "B5" | "B6" | "B7" | "B8" | "B9" | "B11")
         || std::env::var("SANDBOX_B4_ENABLE").as_deref() == Ok("1");
     editor.path = std::env::var_os("SANDBOX_B4_SAVE_PATH").map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("world-b4.edits"));
