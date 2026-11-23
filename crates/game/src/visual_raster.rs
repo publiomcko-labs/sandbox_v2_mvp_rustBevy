@@ -105,7 +105,7 @@ fn sample_frame(
                     pending.id, pending.requested_t, pending.requested_ms,
                     pending.camera.x, pending.camera.y, pending.camera.z,
                     unix_ms(), metadata.len(),
-                    pending.file.file_name().unwrap_or_default().to_string_lossy()
+                    pending.file.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
                 ).and_then(|_| trace.log.flush()) {
                     error!(%error, "B15 raster manifest write failed");
                     trace.failed = true;
