@@ -17,7 +17,8 @@ $p=Start-Process -FilePath (Join-Path $app 'sandbox-game.exe') -WorkingDirectory
 if(-not $p.WaitForExit(85000)){Stop-Process -Id $p.Id -Force;throw 'B12 screenshot deadline exceeded'}
 $l=Get-Content 'b12-evidence/stderr.log' -Raw
 if ($l -notmatch 'B11 far field coverage built'){throw 'Far coverage was not created'}
-if ($l -notmatch 'sequence_index=1.*B2 visual CI: screenshot captured at'){throw 'B12 final screenshot not confirmed'}
+if ($l -notmatch 'B5 130m deterministic rock visual streaming'){throw 'B12 rock and water physics plugin was not activated'}
+if ($l -notmatch 'B2 visual CI: screenshot captured at[^\r\n]*sequence_index=1'){throw 'B12 final screenshot not confirmed'}
 if (@(Get-ChildItem 'b12-evidence/b12-??.png').Count -ne 2){throw 'B12 expected 2 images'}
 if ($l -match '(?i)\bERROR\b|Validation Error|panicked'){throw 'B12 GPU error'}
 Write-Host 'B12_FAR_FIELD_VULKAN_CAPTURE_PASS'
