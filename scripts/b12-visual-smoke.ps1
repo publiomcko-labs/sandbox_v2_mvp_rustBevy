@@ -1,0 +1,23 @@
+# B12 Vulkan visual smoke; run through powershell.exe -ExecutionPolicy Bypass -File.
+$ErrorActionPreference='Stop'
+New-Item -ItemType Directory -Force b12-evidence | Out-Null
+$env:SANDBOX_STAGE='B11'
+$env:SANDBOX_B3_HEADLESS='1'
+$env:SANDBOX_B3_ROUTE='straight'
+$env:SANDBOX_B3_MIXED_LOD='1'
+$env:SANDBOX_B3_RENDER_1080P='1'
+$env:SANDBOX_B10_CAPTURE_TIMES='25,57'
+$env:SANDBOX_B4_SAVE_PATH=(Join-Path (Get-Location).Path 'b12-evidence/b12-edits.txt')
+$env:SANDBOX_B5_SAVE_PATH=(Join-Path (Get-Location).Path 'b12-evidence/b12-rocks.txt')
+$env:SANDBOX_B2_CAPTURE_PATH=(Join-Path (Get-Location).Path 'b12-evidence/b12.png')
+$env:WGPU_BACKEND='vulkan'
+$env:RUST_LOG='info,sandbox_gpu_terrain::b2=warn,sandbox_gpu_terrain::b2::b3=info'
+$app=Join-Path (Get-Location).Path 'b12-runtime'
+$p=Start-Process -FilePath (Join-Path $app 'sandbox-game.exe') -WorkingDirectory $app -PassThru -RedirectStandardError 'b12-evidence/stderr.log' -RedirectStandardOutput 'b12-evidence/stdout.log'
+if(-not $p.WaitForExit(85000)){Stop-Process -Id $p.Id -Force;throw 'B12 screenshot deadline exceeded'}
+$l=Get-Content 'b12-evidence/stderr.log' -Raw
+if ($l -notmatch 'B11 far field coverage built'){throw 'Far coverage was not created'}
+if ($l -notmatch 'sequence_index=1.*B2 visual CI: screenshot captured at'){throw 'B12 final screenshot not confirmed'}
+if (@(Get-ChildItem 'b12-evidence/b12-??.png').Count -ne 2){throw 'B12 expected 2 images'}
+if ($l -match '(?i)\bERROR\b|Validation Error|panicked'){throw 'B12 GPU error'}
+Write-Host 'B12_FAR_FIELD_VULKAN_CAPTURE_PASS'

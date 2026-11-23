@@ -62,11 +62,13 @@ jobs:
         shell: cmd
         run: cargo +1.100.0 build --release --locked -p sandbox-game
       - name: Bundle B12 runtime and shaders
-        shell: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
+        shell: cmd
         run: |
-          New-Item -ItemType Directory -Force dist/b12/assets | Out-Null
-          Copy-Item "$env:CARGO_TARGET_DIR/release/sandbox-game.exe" dist/b12/sandbox-game.exe
-          Copy-Item assets/shaders dist/b12/assets/shaders -Recurse -Force
+          if not exist "dist\b12\assets" mkdir "dist\b12\assets"
+          copy /Y "%CARGO_TARGET_DIR%\release\sandbox-game.exe" "dist\b12\sandbox-game.exe"
+          if errorlevel 1 exit /b 1
+          xcopy /E /I /Y "assets\shaders" "dist\b12\assets\shaders"
+          if errorlevel 1 exit /b 1
       - uses: actions/upload-artifact@v4
         with:
           name: b12-corrected-windows-release
@@ -83,30 +85,8 @@ jobs:
           name: b12-corrected-windows-release
           path: b12-runtime/
       - name: Capture 25s and 57s with distant terrain active
-        shell: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"
-        run: |
-          $ErrorActionPreference='Stop'
-          New-Item -ItemType Directory -Force b12-evidence | Out-Null
-          $env:SANDBOX_STAGE='B11'
-          $env:SANDBOX_B3_HEADLESS='1'
-          $env:SANDBOX_B3_ROUTE='straight'
-          $env:SANDBOX_B3_MIXED_LOD='1'
-          $env:SANDBOX_B3_RENDER_1080P='1'
-          $env:SANDBOX_B10_CAPTURE_TIMES='25,57'
-          $env:SANDBOX_B4_SAVE_PATH=(Join-Path (Get-Location).Path 'b12-evidence/b12-edits.txt')
-          $env:SANDBOX_B5_SAVE_PATH=(Join-Path (Get-Location).Path 'b12-evidence/b12-rocks.txt')
-          $env:SANDBOX_B2_CAPTURE_PATH=(Join-Path (Get-Location).Path 'b12-evidence/b12.png')
-          $env:WGPU_BACKEND='vulkan'
-          $env:RUST_LOG='info,sandbox_gpu_terrain::b2=warn,sandbox_gpu_terrain::b2::b3=info'
-          $app=Join-Path (Get-Location).Path 'b12-runtime'
-          $p=Start-Process -FilePath (Join-Path $app 'sandbox-game.exe') -WorkingDirectory $app -PassThru -RedirectStandardError 'b12-evidence/stderr.log' -RedirectStandardOutput 'b12-evidence/stdout.log'
-          if(-not $p.WaitForExit(85000)){Stop-Process -Id $p.Id -Force;throw 'B12 screenshot deadline exceeded'}
-          $l=Get-Content 'b12-evidence/stderr.log' -Raw
-          if ($l -notmatch 'B11 far field coverage built'){throw 'Far coverage was not created'}
-          if ($l -notmatch 'sequence_index=1.*B2 visual CI: screenshot captured at'){throw 'B12 final screenshot not confirmed'}
-          if (@(Get-ChildItem 'b12-evidence/b12-??.png').Count -ne 2){throw 'B12 expected 2 images'}
-          if ($l -match '(?i)\bERROR\b|Validation Error|panicked'){throw 'B12 GPU error'}
-          Write-Host 'B12_FAR_FIELD_VULKAN_CAPTURE_PASS'
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b12-visual-smoke.ps1"
       - if: always()
         uses: actions/upload-artifact@v4
         with:
