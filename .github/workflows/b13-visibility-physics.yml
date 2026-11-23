@@ -1,0 +1,97 @@
+name: B13 GPU frustum continuity and rock physics readiness
+on:
+  push:
+    branches:
+      - 'fix/b13-*'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: b13-visibility-physics
+  cancel-in-progress: true
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bevy Linux compile prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev
+      - name: Rust 1.100
+        run: |
+          rustup toolchain install 1.100.0 --profile minimal --no-self-update
+          rustup default 1.100.0
+      - name: Compile Bevy/Avian and run support-guard regression tests
+        run: cargo test --locked -p sandbox-game b13_ -- --nocapture
+      - name: Check GPU terrain streaming compilation
+        run: cargo check --locked -p sandbox-game
+  release:
+    needs: preflight
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 110
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      CARGO_TARGET_DIR: ${{ github.workspace }}\\..\\_b6_cargo_target
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native Rust 1.100 MSVC
+        shell: cmd
+        env:
+          CARGO_HOME: ${{ runner.temp }}\\b0-cargo
+          RUSTUP_HOME: ${{ runner.temp }}\\b0-rustup
+        run: |
+          if not exist "%CARGO_HOME%\\bin\\rustup.exe" (
+            curl.exe --proto =https --tlsv1.2 --retry 3 -fL -o "%RUNNER_TEMP%\\rustup-init.exe" https://win.rustup.rs/x86_64
+            if errorlevel 1 exit /b 1
+            "%RUNNER_TEMP%\\rustup-init.exe" -y --no-modify-path --default-toolchain none
+            if errorlevel 1 exit /b 1
+          )
+          "%CARGO_HOME%\\bin\\rustup.exe" toolchain install 1.100.0 --profile minimal --component rustfmt --no-self-update
+          if errorlevel 1 exit /b 1
+          echo %CARGO_HOME%\\bin>>"%GITHUB_PATH%"
+          echo CARGO_HOME=%CARGO_HOME%>>"%GITHUB_ENV%"
+          echo RUSTUP_HOME=%RUSTUP_HOME%>>"%GITHUB_ENV%"
+      - name: Build B13 GPU/physics Windows Release
+        shell: cmd
+        run: cargo +1.100.0 build --release --locked -p sandbox-game
+      - name: Package B13 runtime
+        shell: cmd
+        run: |
+          if not exist "dist\\b13\\assets" mkdir "dist\\b13\\assets"
+          copy /Y "%CARGO_TARGET_DIR%\\release\\sandbox-game.exe" "dist\\b13\\sandbox-game.exe"
+          if errorlevel 1 exit /b 1
+          xcopy /E /I /Y "assets\\shaders" "dist\\b13\\assets\\shaders"
+          if errorlevel 1 exit /b 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: b13-frustum-physics-windows-release
+          path: dist/b13/
+          if-no-files-found: error
+  visual-smoke:
+    needs: release
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: b13-frustum-physics-windows-release
+          path: b13-runtime/
+      - name: Check live Vulkan draw, SDF colliders and delayed rock activation
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b13-visibility-physics-smoke.ps1"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b13-frustum-physics-evidence
+          path: b13-evidence/
+          if-no-files-found: warn
