@@ -22,7 +22,7 @@ use std::time::Duration;
 fn main() {
     let stage = std::env::var("SANDBOX_STAGE").unwrap_or_default();
     let b0 = stage.eq_ignore_ascii_case("B0");
-    let b3 = ["B3", "B4", "B5", "B6", "B7", "B8", "B9", "B11", "B11", "B9"].iter().any(|s| stage.eq_ignore_ascii_case(s));
+    let b3 = ["B3", "B4", "B5", "B6", "B7", "B8", "B9", "B11"].iter().any(|s| stage.eq_ignore_ascii_case(s));
     let headless = !b0
         && (std::env::var("SANDBOX_B2_HEADLESS").as_deref() == Ok("1")
             || std::env::var("SANDBOX_B3_HEADLESS").as_deref() == Ok("1"));
@@ -88,7 +88,7 @@ fn main() {
     } else {
         app.add_plugins(GpuTerrainB2Plugin);
     }
-    if ["B5", "B6", "B7", "B8"].iter().any(|s| stage.eq_ignore_ascii_case(s)) {
+    if ["B5", "B6", "B7", "B8", "B11"].iter().any(|s| stage.eq_ignore_ascii_case(s)) {
         app.add_plugins(physics::MvpPhysicsPlugin);
     }
     if stage.eq_ignore_ascii_case("B11")
