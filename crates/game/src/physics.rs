@@ -7,6 +7,7 @@ use sandbox_gpu_terrain::b2::b3::B4EditState;
 use sandbox_world_core::{
     BlockCoord,
     collision::{surface_from_world, TILE_METERS},
+    edits::WorldEdits,
     density::{hash2, terrain_height_half},
 };
 use std::{collections::{HashMap, HashSet}, fs, path::PathBuf};
@@ -30,6 +31,10 @@ struct B8GroundProbe{starting_ground_y:f32,started_s:f32}
 const COLLIDER_CELL_M: i32 = TILE_METERS;
 const COLLIDER_BUILDS_PER_FRAME: usize = 24;
 const COLLIDER_RADIUS_M: f32 = 24.0;
+// Always keep an unallocated-support margin; SDF tiles are published at
+// most 24 per frame, and camera displacement can exceed mesh publication.
+const ROCK_DYNAMIC_START_M: f32 = 16.0;
+const ROCK_DYNAMIC_STOP_M: f32 = 19.0;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Component)]
 struct RockId { x: i32, z: i32 }
@@ -48,6 +53,9 @@ struct RockWorld {
     save_path: PathBuf,
     last_save_s: f32,
     load_failed: bool,
+    guard_activation_delays: u64,
+    guard_freezes: u64,
+    last_guard_report_s: f32,
 }
 
 #[derive(Resource, Default)]
@@ -67,9 +75,12 @@ impl Plugin for MvpPhysicsPlugin {
             .init_resource::<B8ProbeReport>()
             .init_resource::<B8GroundReport>()
             .add_systems(Startup, (setup_rocks_water,spawn_b8_buoyancy_probes))
+            // Collider residency is committed first; only then may the rock
+            // guard enable Avian dynamic motion in that same update tick.
+            .add_systems(Update, (maintain_terrain_colliders,stream_rocks).chain())
             .add_systems(Update, (
-                stream_rocks, maintain_terrain_colliders, save_rock_states,
-                observe_b8_buoyancy_probes, spawn_b8_ground_probe, observe_b8_ground_probe,
+                save_rock_states, observe_b8_buoyancy_probes,
+                spawn_b8_ground_probe, observe_b8_ground_probe,
             ))
             .add_systems(FixedUpdate, buoyancy_for_bodies);
     }
@@ -179,12 +190,62 @@ fn setup_rocks_water(
     }
 }
 
+/// Locate the nearest real edited-SDF solid surface below a rock.
+/// This also supports cave floors; the procedural terrain height alone
+/// would incorrectly treat a cave roof as a floor.
+fn sdf_floor_below_rock(pos:Vec3, world:&WorldEdits)->Option<f32>{
+    if !pos.is_finite(){return None;}
+    let hx=(pos.x*2.0).round() as i32;
+    let hz=(pos.z*2.0).round() as i32;
+    if world.sample(SEED,[hx,(pos.y*2.0).round() as i32,hz])<=0.0 {
+        return None;
+    }
+    for step in 1..=64 {
+        let y=pos.y-step as f32*0.5;
+        if world.sample(SEED,[hx,(y*2.0).round() as i32,hz])<=0.0 {
+            return Some(y);
+        }
+    }
+    None
+}
+/// A rock can become dynamic only when all 4m SDF collider tiles directly
+/// underneath its footprint have been built for the current edit revision.
+/// A zero-triangle tile is not considered collision support.
+fn rock_collision_support_ready(
+    position:Vec3, terrain:&TerrainColliders, world:&WorldEdits,
+)->bool{
+    let Some(ground_y)=sdf_floor_below_rock(position,world) else{return false;};
+    let gx0=((position.x-ROCK_RADIUS).floor() as i32).div_euclid(COLLIDER_CELL_M);
+    let gx1=((position.x+ROCK_RADIUS).floor() as i32).div_euclid(COLLIDER_CELL_M);
+    let gz0=((position.z-ROCK_RADIUS).floor() as i32).div_euclid(COLLIDER_CELL_M);
+    let gz1=((position.z+ROCK_RADIUS).floor() as i32).div_euclid(COLLIDER_CELL_M);
+    let gy=(ground_y.floor() as i32).div_euclid(COLLIDER_CELL_M);
+    for gx in gx0..=gx1 {
+        for gz in gz0..=gz1 {
+            let ready=((gy-1)..=(gy+1)).any(|y|{
+                let key=(gx,y,gz);
+                let cell=BlockCoord::from_meter_grid(
+                    (gx*COLLIDER_CELL_M+COLLIDER_CELL_M/2) as i64,
+                    (y*COLLIDER_CELL_M+COLLIDER_CELL_M/2) as i64,
+                    (gz*COLLIDER_CELL_M+COLLIDER_CELL_M/2) as i64,
+                );
+                terrain.cells.get(&key).is_some_and(|(entity,revision)|
+                    entity.is_some() && *revision==world.revision(cell))
+            });
+            if !ready{return false;}
+        }
+    }
+    true
+}
+
 fn stream_rocks(
     mut commands: Commands,
     time: Res<Time>,
     camera: Query<&Transform, With<Camera3d>>,
     scene_rocks: Query<(Entity, &RockId, &Transform, Option<&RigidBody>, Option<&LinearVelocity>)>,
     mut rocks: ResMut<RockWorld>,
+    terrain: Res<TerrainColliders>,
+    editor: Res<B4EditState>,
 ) {
     let Some(view) = camera.iter().next() else { return; };
     let pos = view.translation;
@@ -193,18 +254,31 @@ fn stream_rocks(
     }
     for (entity,id,transform,body,velocity) in &scene_rocks {
         let horizontal = Vec2::new(pos.x-transform.translation.x, pos.z-transform.translation.z).length();
-        if body.is_none() && horizontal <= 28.0 {
-            commands.entity(entity).insert((
-                RigidBody::Dynamic,
-                Collider::sphere(ROCK_RADIUS),
-                Buoyancy{radius:ROCK_RADIUS,density:ROCK_DENSITY},
-                Friction::new(0.8),
-                Restitution::new(0.05),
-                LinearVelocity(rocks.states.get(id).map_or(Vec3::ZERO, |s| s.velocity)),
-            ));
-        } else if body.is_some() && horizontal > 36.0
-            && velocity.is_none_or(|v| v.0.length() < 0.1)
-        {
+        let close_enough=horizontal<=ROCK_DYNAMIC_START_M;
+        let supported=horizontal<=ROCK_DYNAMIC_STOP_M
+            && rock_collision_support_ready(transform.translation,&terrain,&editor.world);
+        if body.is_none() && close_enough {
+            if supported {
+                commands.entity(entity).insert((
+                    RigidBody::Dynamic,
+                    Collider::sphere(ROCK_RADIUS),
+                    Buoyancy{radius:ROCK_RADIUS,density:ROCK_DENSITY},
+                    Friction::new(0.8),
+                    Restitution::new(0.05),
+                    LinearVelocity(rocks.states.get(id).map_or(Vec3::ZERO, |s| s.velocity)),
+                ));
+            } else {
+                // A dynamic body over missing terrain falls irreversibly
+                // before the async triangulation completes. Keep it static.
+                rocks.guard_activation_delays+=1;
+            }
+        } else if body.is_some() && (!supported || horizontal>ROCK_DYNAMIC_STOP_M) {
+            // Do not let a rock keep falling after its collision tiles have
+            // been evicted or the camera outruns the collider streamer.
+            rocks.guard_freezes+=1;
+            rocks.states.insert(*id,Snapshot{
+                position:transform.translation,velocity:Vec3::ZERO,
+            });
             commands.entity(entity)
                 .remove::<RigidBody>()
                 .remove::<Collider>()
@@ -219,6 +293,15 @@ fn stream_rocks(
             rocks.entities.remove(id);
             commands.entity(entity).despawn();
         }
+    }
+    if time.elapsed_secs()-rocks.last_guard_report_s>=5.0 {
+        rocks.last_guard_report_s=time.elapsed_secs();
+        info!(
+            activation_delays=rocks.guard_activation_delays,
+            freezes=rocks.guard_freezes,
+            active_terrain_cells=terrain.cells.values().filter(|(e,_)|e.is_some()).count(),
+            "B13 physics rock/collider residency guard"
+        );
     }
     let grid_center = ((pos.x / 8.0).floor() as i32, (pos.z / 8.0).floor() as i32);
     if rocks.last_center == Some(grid_center) { return; }
@@ -493,6 +576,44 @@ mod tests {
         assert!((submerged_fraction(0.0,0.5,0.0)-0.5).abs()<1e-6);
         assert!(buoyancy_acceleration(-1.0,ROCK_RADIUS,ROCK_DENSITY)<9.81);
         assert!(buoyancy_acceleration(-1.0,ROCK_RADIUS,450.0)>9.81);
+    }
+    #[test]
+    fn b13_rock_cannot_start_physics_without_real_current_revision_colliders() {
+        let world=WorldEdits::default();
+        let pos=default_rock_position(RockId{x:1,z:-1});
+        let mut terrain=TerrainColliders::default();
+        assert!(!rock_collision_support_ready(pos,&terrain,&world));
+        let floor=sdf_floor_below_rock(pos,&world).expect("test rock must be above SDF");
+        let gx0=((pos.x-ROCK_RADIUS).floor() as i32).div_euclid(COLLIDER_CELL_M);
+        let gx1=((pos.x+ROCK_RADIUS).floor() as i32).div_euclid(COLLIDER_CELL_M);
+        let gz0=((pos.z-ROCK_RADIUS).floor() as i32).div_euclid(COLLIDER_CELL_M);
+        let gz1=((pos.z+ROCK_RADIUS).floor() as i32).div_euclid(COLLIDER_CELL_M);
+        let gy=(floor.floor() as i32).div_euclid(COLLIDER_CELL_M);
+        let mut ecs=World::new();
+        let entity=ecs.spawn_empty().id();
+        for gx in gx0..=gx1 {
+            for gz in gz0..=gz1 {
+                let cell=BlockCoord::from_meter_grid(
+                    (gx*COLLIDER_CELL_M+2) as i64,
+                    (gy*COLLIDER_CELL_M+2) as i64,
+                    (gz*COLLIDER_CELL_M+2) as i64,
+                );
+                terrain.cells.insert((gx,gy,gz),(Some(entity),world.revision(cell)));
+            }
+        }
+        assert!(rock_collision_support_ready(pos,&terrain,&world));
+        let first=(gx0,gy,gz0);
+        let (owned,_) = terrain.cells[&first];
+        terrain.cells.insert(first,(owned,u64::MAX));
+        assert!(!rock_collision_support_ready(pos,&terrain,&world),
+             "stale edited collider must not let a rock become dynamic");
+    }
+    #[test]
+    fn b13_submerged_or_solid_position_must_never_be_armed_without_a_floor() {
+        let world=WorldEdits::default();
+        assert!(sdf_floor_below_rock(Vec3::new(0.0,-80.0,0.0),&world).is_none());
+        assert!(!rock_collision_support_ready(Vec3::new(0.0,-80.0,0.0),
+                    &TerrainColliders::default(),&world));
     }
     #[test]
     fn seed_based_rock_position_and_save_reopen() {
