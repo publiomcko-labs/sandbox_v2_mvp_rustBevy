@@ -11,7 +11,7 @@ use super::{
 };
 use bevy::{
     asset::RenderAssetUsages,
-    camera::{RenderTarget, primitives::Aabb},
+    camera::{RenderTarget, visibility::NoFrustumCulling},
     core_pipeline::schedule::camera_driver,
     mesh::Indices,
     prelude::*,
@@ -260,6 +260,7 @@ fn setup_b3_scene(
     } else {
         commands.spawn((Camera3d::default(), camera_transform));
     }
+    info!("B13 GPU mesh visibility: frustum culling disabled for compute-produced vertices");
     info!(
         "B3 streaming stage initialized: 130m horizon, 36m directional prefetch, uniform LOD2, 18m/s route optional"
     );
@@ -299,7 +300,11 @@ fn create_block(
             Mesh3d(handle.clone()),
             MeshMaterial3d(material.clone()),
             Visibility::Hidden,
-            Aabb::from_min_max(Vec3::splat(-2.1), Vec3::splat(16.1)),
+            // Positions and indices are generated after mesh allocation on the
+            // GPU. The CPU placeholder has only zero vertices, so its AABB
+            // cannot be trusted for camera-frustum rejection. Keep B3's
+            // actually resident geometry drawable, as B2 already does.
+            NoFrustumCulling,
             Transform::from_xyz(
                 coord.x as f32 * 16.0,
                 coord.y as f32 * 16.0,
