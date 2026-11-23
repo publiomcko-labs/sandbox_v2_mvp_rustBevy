@@ -15,7 +15,7 @@ $env:RUST_LOG='info,sandbox_gpu_terrain::b2=warn,sandbox_gpu_terrain::b2::b3=inf
 $app=Join-Path (Get-Location).Path 'b11-runtime'
 $p=Start-Process -FilePath (Join-Path $app 'sandbox-game.exe') -WorkingDirectory $app -PassThru -RedirectStandardError 'b11-evidence/stderr.log' -RedirectStandardOutput 'b11-evidence/stdout.log'
 if(-not $p.WaitForExit(85000)){Stop-Process -Id $p.Id -Force;throw 'B11 screenshot deadline exceeded'}
-$l=Get-Content 'b11-evidence/stderr.log' -Raw
+$l=(Get-Content 'b11-evidence/stderr.log' -Raw) -replace '\x1b\[[0-9;]*m',''
 if ($l -notmatch 'B11 far field coverage built'){throw 'Far coverage was not created'}
 if ($l -notmatch 'B5 130m deterministic rock visual streaming'){throw 'B11 rock and water physics plugin was not activated'}
 if ($l -notmatch 'B2 visual CI: screenshot captured at[^\r\n]*sequence_index=1'){throw 'B11 final screenshot not confirmed'}
