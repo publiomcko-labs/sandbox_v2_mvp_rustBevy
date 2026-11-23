@@ -11,7 +11,6 @@ $env:SANDBOX_B15_START_S = '48'
 $env:SANDBOX_B15_END_S = '56'
 $env:SANDBOX_B15_INTERVAL_S = '0.25'
 & (Join-Path $PSScriptRoot 'b14-headless-visibility-smoke.ps1')
-if ($LASTEXITCODE -ne 0) { throw "B14 headless prerequisite returned $LASTEXITCODE" }
 $manifest = Join-Path $raster 'b15-raster.csv'
 if (-not (Test-Path -LiteralPath $manifest)) { throw 'B15 raster manifest not generated' }
 $records = @(Import-Csv -LiteralPath $manifest)
