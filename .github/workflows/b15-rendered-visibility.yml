@@ -1,0 +1,67 @@
+name: B15 raster evidence Windows Vulkan diagnostic
+on:
+  push:
+    branches:
+      - 'diag/b15-rendered-visibility-20261123'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: b15-rendered-visibility
+  cancel-in-progress: true
+jobs:
+  windows-raster-and-trace:
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      CARGO_TARGET_DIR: ${{ github.workspace }}\..\_b6_cargo_target
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reuse existing Windows MSVC Rust environment
+        shell: cmd
+        env:
+          CARGO_HOME: ${{ runner.temp }}\b0-cargo
+          RUSTUP_HOME: ${{ runner.temp }}\b0-rustup
+        run: |
+          if not exist "%CARGO_HOME%\bin\rustup.exe" (
+            curl.exe --proto =https --tlsv1.2 --retry 3 -fL -o "%RUNNER_TEMP%\rustup-init.exe" https://win.rustup.rs/x86_64
+            if errorlevel 1 exit /b 1
+            "%RUNNER_TEMP%\rustup-init.exe" -y --no-modify-path --default-toolchain none
+            if errorlevel 1 exit /b 1
+          )
+          "%CARGO_HOME%\bin\rustup.exe" toolchain install 1.100.0 --profile minimal --no-self-update
+          if errorlevel 1 exit /b 1
+          echo %CARGO_HOME%\bin>>"%GITHUB_PATH%"
+          echo CARGO_HOME=%CARGO_HOME%>>"%GITHUB_ENV%"
+          echo RUSTUP_HOME=%RUSTUP_HOME%>>"%GITHUB_ENV%"
+      - name: Build B15 Release using shared Cargo target cache
+        shell: cmd
+        run: cargo +1.100.0 build --release --locked -p sandbox-game
+      - name: Package executable and original shader assets
+        shell: cmd
+        run: |
+          if not exist "b15-runtime\assets" mkdir "b15-runtime\assets"
+          copy /Y "%CARGO_TARGET_DIR%\release\sandbox-game.exe" "b15-runtime\sandbox-game.exe"
+          if errorlevel 1 exit /b 1
+          xcopy /E /I /Y "assets\shaders" "b15-runtime\assets\shaders"
+          if errorlevel 1 exit /b 1
+      - name: Run 72s B14 trace and B15 actual framebuffer sampling
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-headless-raster-smoke.ps1"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b15-rendered-visibility-evidence
+          path: |
+            b14-evidence/
+            b15-evidence/
+          if-no-files-found: warn
+      - if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b15-windows-release
+          path: b15-runtime/
+          if-no-files-found: error
