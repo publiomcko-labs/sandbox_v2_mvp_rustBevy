@@ -24,9 +24,15 @@ pub fn configure(app:&mut App) {
     let sequence=std::env::var("SANDBOX_B8_CAPTURE_SEQUENCE").as_deref()==Ok("1");
     // A real time-series records intermediate LOD updates as the camera moves.
     // Never interpret it alone as proof that no sub-frame flicker exists.
-    let times=if sequence {
+    let custom_times=std::env::var("SANDBOX_B10_CAPTURE_TIMES").ok().and_then(|value|{
+        let numbers:Option<Vec<f32>>=value.split(',').map(|t|t.trim().parse::<f32>().ok()).collect();
+        numbers.filter(|ts|!ts.is_empty() && ts.len()<=16
+            && ts.iter().all(|t|t.is_finite()&&*t>=1.0&&*t<=120.0)
+            && ts.windows(2).all(|two|two[0]+0.5<two[1]))
+    });
+    let times=custom_times.unwrap_or_else(||if sequence {
         vec![12.0,16.0,20.0,24.0,28.0,32.0,36.0,40.0,44.0]
-    }else{vec![capture_after_secs]};
+    }else{vec![capture_after_secs]});
     app.insert_resource(VisualCaptureState{
         path:PathBuf::from(path),times,next:0,requested_at:None,pending_path:None,
     }).add_systems(Update,capture_frame);

@@ -164,12 +164,19 @@ fn setup_rocks_water(
         cull_mode: None,
         ..default()
     });
-    rocks.water_entity = Some(commands.spawn((
+    // B10 diagnostic A/B: preserve every other system, disable only the
+    // visible ocean mesh to distinguish holes from transparency/shoreline.
+    // Buoyancy remains enabled; never use this mode for a water acceptance gate.
+    if std::env::var("SANDBOX_B10_HIDE_OCEAN").as_deref() == Ok("1") {
+        info!("B10 comparison: ocean render mesh hidden; water physics unchanged");
+    } else {
+        rocks.water_entity = Some(commands.spawn((
         Mesh3d(water_mesh),
         MeshMaterial3d(water_material),
         Transform::from_xyz(0.0, WATER_Y, 0.0),
         Name::new("B5 ocean, y=0"),
     )).id());
+    }
 }
 
 fn stream_rocks(
