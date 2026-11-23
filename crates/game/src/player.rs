@@ -13,7 +13,7 @@ const PRECISE_SPEED_MPS: f32 = 6.0;
 const MOUSE_SENSITIVITY: f32 = 0.0025;
 
 #[derive(Default)]
-struct B9LocalCamera {
+pub(crate) struct B9LocalCamera {
     route_segment: Option<usize>,
     announced: bool,
 }
