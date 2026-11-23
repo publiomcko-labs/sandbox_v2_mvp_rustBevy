@@ -17,14 +17,14 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_RELEASE_DEBUG: '0'
-      CARGO_TARGET_DIR: \${{ github.workspace }}\..\_b6_cargo_target
+      CARGO_TARGET_DIR: ${{ github.workspace }}\..\_b6_cargo_target
     steps:
       - uses: actions/checkout@v4
       - name: Reuse existing Windows MSVC Rust environment
         shell: cmd
         env:
-          CARGO_HOME: \${{ runner.temp }}\b0-cargo
-          RUSTUP_HOME: \${{ runner.temp }}\b0-rustup
+          CARGO_HOME: ${{ runner.temp }}\b0-cargo
+          RUSTUP_HOME: ${{ runner.temp }}\b0-rustup
         run: |
           if not exist "%CARGO_HOME%\bin\rustup.exe" (
             curl.exe --proto =https --tlsv1.2 --retry 3 -fL -o "%RUNNER_TEMP%\rustup-init.exe" https://win.rustup.rs/x86_64
