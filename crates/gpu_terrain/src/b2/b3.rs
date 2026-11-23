@@ -49,6 +49,8 @@ const DIRECTION_COSINE_THRESHOLD: f32 = 0.96;
 #[derive(Resource, Clone, Default)]
 pub(super) struct B3ReadySet(pub Arc<Mutex<HashSet<AssetId<Mesh>>>>);
 
+mod frame_audit;
+
 pub struct GpuTerrainB3Plugin;
 
 impl Plugin for GpuTerrainB3Plugin {
@@ -61,6 +63,25 @@ impl Plugin for GpuTerrainB3Plugin {
             .add_plugins(ExtractComponentPlugin::<BuildSdfMesh>::default())
             .add_systems(Startup, setup_b3_scene)
             .add_systems(PostUpdate, stream_b3);
+
+        // B14 stays completely absent outside explicit diagnostic runs.
+        // The Last schedule sees the current frame's PostUpdate publication
+        // and Bevy ViewVisibility after visibility propagation/culling.
+        if let Ok(trace_dir) = std::env::var("SANDBOX_B14_TRACE_DIR") {
+            if !trace_dir.trim().is_empty() {
+                match frame_audit::B14FrameAudit::open(&trace_dir) {
+                    Ok(audit) => {
+                        app.insert_resource(audit)
+                            .add_systems(Last, frame_audit::trace_frame);
+                        info!(path=%trace_dir, "B14 per-frame visibility trace enabled");
+                    },
+                    Err(error) => {
+                        error!(%error,path=%trace_dir,
+                            "B14 per-frame trace initialization failed");
+                    },
+                }
+            }
+        }
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
