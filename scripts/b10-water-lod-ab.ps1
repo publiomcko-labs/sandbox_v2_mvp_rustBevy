@@ -51,7 +51,7 @@ foreach ($arm in $scenarios){
     $results+=,[pscustomobject]$record
     if($screens.Count -ne 2){throw "B10 arm $($arm.name) screenshot count=$($screens.Count), expected two"}
     if($record.gpu_errors -gt 0){throw "B10 arm $($arm.name) GPU/runtime error"}
-    if($log -notmatch 'sequence_index=1.*B2 visual CI: screenshot captured at'){throw "B10 arm $($arm.name) final screenshot not confirmed"}
+    if($log -notmatch 'B2 visual CI: screenshot captured at[^\r\n]*sequence_index=1'){throw "B10 arm $($arm.name) final screenshot not confirmed"}
 }
 $results|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $reportDir 'B10_AB_REPORT.json') -Encoding UTF8
 $results|Format-Table -AutoSize|Out-String|Write-Host
