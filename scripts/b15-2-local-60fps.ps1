@@ -7,7 +7,8 @@ param(
     [ValidateRange(15,300)][int]$DurationSeconds = 120,
     [ValidateRange(24,60)][int]$Fps = 60,
     [ValidateSet('0','1')][string]$FarShell = '1',
-    [ValidateSet('0','1')][string]$AtomicEdits = '1'
+    [ValidateSet('0','1')][string]$AtomicEdits = '1',
+    [ValidateSet('Nvenc','Cpu')][string]$Encoder = 'Nvenc'
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -145,6 +146,7 @@ try {
         Write-Host 'B15.2 AUTO: waiting for survey warmup to end before motion preflight.'
         Start-Sleep -Seconds 12
     }
+    Write-Host "B15_2_ENCODER_SELECTED $Encoder"
     Write-Host 'PREFLIGHT: MOVE THE CAMERA OR WALK DURING THE NEXT 8 SECONDS.'
     # Match the direct interactive FFmpeg command proven to work on the
     # user's Windows desktop. Start-Process/-WindowStyle Hidden was returning
@@ -157,11 +159,20 @@ try {
         # Windows PowerShell 5.1 wraps native stderr records as errors;
         # do not let informational FFmpeg output become a terminating error.
         $ErrorActionPreference = 'Continue'
-        & $ffmpeg.Source -y -hide_banner -loglevel info `
-            -f gdigrab -framerate 15 -draw_mouse 0 `
-            -offset_x $x -offset_y $y -video_size "${w}x${h}" `
-            -i desktop -t 8 -c:v libx264 -preset ultrafast `
-            -crf 26 -pix_fmt yuv420p "$preflight" 2>&1 |
+        $preflightArgs = @(
+            '-y','-hide_banner','-loglevel','info',
+            '-f','gdigrab','-framerate','15','-draw_mouse','0',
+            '-offset_x',"$x",'-offset_y',"$y",'-video_size',"${w}x${h}",
+            '-i','desktop','-t','8'
+        )
+        if ($Encoder -eq 'Nvenc') {
+            $preflightArgs += @('-c:v','h264_nvenc','-preset','p1',
+                '-rc','vbr','-cq','26','-b:v','0')
+        } else {
+            $preflightArgs += @('-c:v','libx264','-preset','ultrafast','-crf','26')
+        }
+        $preflightArgs += @('-pix_fmt','yuv420p',"$preflight")
+        & $ffmpeg.Source @preflightArgs 2>&1 |
             Out-File -LiteralPath $probeLog -Encoding UTF8
         $preflightExitCode = $LASTEXITCODE
     } finally {
@@ -177,7 +188,7 @@ try {
         $logTail = if (Test-Path -LiteralPath $probeLog) {
             (Get-Content -LiteralPath $probeLog -Tail 12) -join ' | '
         } else { 'no FFmpeg log' }
-        throw "B15_2_PREFLIGHT_ENCODING_FAILED exit=$preflightExitCode bytes=$preflightSize; $logTail"
+        throw "B15_2_PREFLIGHT_ENCODING_FAILED encoder=$Encoder exit=$preflightExitCode bytes=$preflightSize; $logTail. If NVENC fails, retry with -Encoder Cpu."
     }
     $first = Join-Path $session 'preflight-first.gray'
     $last = Join-Path $session 'preflight-last.gray'
@@ -210,12 +221,20 @@ try {
     $oldErrorPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        & $ffmpeg.Source -y -hide_banner -loglevel info `
-            -f gdigrab -framerate $Fps -draw_mouse 0 `
-            -offset_x $x -offset_y $y -video_size "${w}x${h}" `
-            -i desktop -t $DurationSeconds -c:v libx264 `
-            -preset ultrafast -crf 20 -pix_fmt yuv420p `
-            -movflags +faststart "$video" 2>&1 |
+        $recordingArgs = @(
+            '-y','-hide_banner','-loglevel','info',
+            '-f','gdigrab','-framerate',"$Fps",'-draw_mouse','0',
+            '-offset_x',"$x",'-offset_y',"$y",'-video_size',"${w}x${h}",
+            '-i','desktop','-t',"$DurationSeconds"
+        )
+        if ($Encoder -eq 'Nvenc') {
+            $recordingArgs += @('-c:v','h264_nvenc','-preset','p1',
+                '-rc','vbr','-cq','22','-b:v','0')
+        } else {
+            $recordingArgs += @('-c:v','libx264','-preset','ultrafast','-crf','20')
+        }
+        $recordingArgs += @('-pix_fmt','yuv420p','-movflags','+faststart',"$video")
+        & $ffmpeg.Source @recordingArgs 2>&1 |
             Out-File -LiteralPath $recordingLog -Encoding UTF8
         $recordingExitCode = $LASTEXITCODE
     } finally {
@@ -226,12 +245,12 @@ try {
     if ($recordingExists) {
         $recordingSize = (Get-Item -LiteralPath $video).Length
     }
-    Write-Host "B15_2_RECORDING_FFMPEG exit=$recordingExitCode bytes=$recordingSize"
+    Write-Host "B15_2_RECORDING_FFMPEG encoder=$Encoder exit=$recordingExitCode bytes=$recordingSize"
     if ($recordingExitCode -ne 0 -or $recordingSize -lt 100000) {
         $logTail = if (Test-Path -LiteralPath $recordingLog) {
             (Get-Content -LiteralPath $recordingLog -Tail 12) -join ' | '
         } else { 'no FFmpeg log' }
-        throw "B15_2_RECORDING_FAILED exit=$recordingExitCode bytes=$recordingSize; $logTail"
+        throw "B15_2_RECORDING_FAILED encoder=$Encoder exit=$recordingExitCode bytes=$recordingSize; $logTail"
     }
     $streamJson = & $ffprobe.Source -v error -count_frames -select_streams v:0 `
         -show_entries stream=nb_read_frames,duration,width,height -of json "$video"
@@ -247,6 +266,7 @@ try {
     $meta = [ordered]@{
         source = 'B15.2 experimental edit-cohort and B11 shell isolation'
         mode = $Mode
+        video_encoder = $Encoder
         far_shell = $FarShell
         atomic_edits = $AtomicEdits
         expected_requested_fps = $Fps
