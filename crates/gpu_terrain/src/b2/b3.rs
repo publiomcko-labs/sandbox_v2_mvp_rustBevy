@@ -29,7 +29,7 @@ use sandbox_streaming::{
         BLOCKS_PER_FRAME, STREAM_LOD, StreamPlan, block_distance_xz, plan, within_retention,
     },
 };
-use sandbox_world_core::{BlockCoord, density::DensityGrid, edits::{Brush, EditMode, WorldEdits}};
+use sandbox_world_core::{BlockCoord, density::{DensityGrid, terrain_height_half}, edits::{Brush, EditMode, WorldEdits}};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -140,6 +140,7 @@ pub struct B4EditState {
     enabled: bool,
     load_failed: bool,
     auto_test_done: bool,
+    scripted_edit_index: usize,
     pending_latency: HashMap<BlockCoord, Instant>,
 }
 
@@ -150,9 +151,19 @@ fn b4_brush_input(
     camera: Query<&Transform, With<Camera3d>>,
 ) {
     if !editor.enabled || editor.load_failed { return; }
+    // Deterministic, opt-in six-edit stress arm for B15.1. The B11 route
+    // passes new, revisited, and LOD-refined terrain in both A/B runs.
+    // Default interactive controls and persisted gameplay remain unchanged.
+    const SCRIPT_TIMES: [f32; 6] = [25.0, 28.0, 31.0, 34.0, 37.0, 40.0];
+    let scripted = std::env::var("SANDBOX_B15_1_SCRIPTED_EDITS").as_deref() == Ok("1")
+        && editor.scripted_edit_index < SCRIPT_TIMES.len()
+        && time.elapsed_secs() >= SCRIPT_TIMES[editor.scripted_edit_index];
     let auto = std::env::var("SANDBOX_B4_TEST_BRUSH").as_deref() == Ok("1")
         && !editor.auto_test_done && time.elapsed_secs() > 8.0;
-    let mode = if auto || mouse.just_pressed(MouseButton::Left) {
+    let mode = if scripted {
+        if editor.scripted_edit_index % 2 == 0 { EditMode::Subtract }
+        else { EditMode::Add }
+    } else if auto || mouse.just_pressed(MouseButton::Left) {
         EditMode::Subtract
     } else if mouse.just_pressed(MouseButton::Right) {
         EditMode::Add
@@ -160,20 +171,32 @@ fn b4_brush_input(
         return;
     };
     if auto { editor.auto_test_done = true; }
+    if scripted { editor.scripted_edit_index += 1; }
     let Some(transform) = camera.iter().next() else { return; };
-    let mut hit = None;
-    // Locate the actual SDF zero crossing, not a fixed point in front of the camera.
-    for step in 1..=200 {
-        let p = transform.translation + transform.forward() * (step as f32 * 0.25);
-        let half = [(p.x * 2.0).round() as i32, (p.y * 2.0).round() as i32, (p.z * 2.0).round() as i32];
-        if editor.world.sample(SEED, half) <= 0.0 {
-            hit = Some(half);
-            break;
+    let center_half = if scripted {
+        let x = (transform.translation.x * 2.0).round() as i32;
+        let z = (transform.translation.z * 2.0).round() as i32;
+        let y = (terrain_height_half(SEED, x, z) * 2.0).round() as i32;
+        info!(index=editor.scripted_edit_index, t_s=time.elapsed_secs(),
+            "B15.1 scripted edit requested");
+        [x,y,z]
+    } else {
+        // Preserve original raycast for all interactive edits.
+        let mut hit = None;
+        for step in 1..=200 {
+            let p = transform.translation + transform.forward() * (step as f32 * 0.25);
+            let half = [(p.x * 2.0).round() as i32,
+                (p.y * 2.0).round() as i32, (p.z * 2.0).round() as i32];
+            if editor.world.sample(SEED, half) <= 0.0 {
+                hit = Some(half);
+                break;
+            }
         }
-    }
-    let Some(center_half) = hit else {
-        warn!("B4 input: no SDF surface within ray range (50m)");
-        return;
+        let Some(center_half) = hit else {
+            warn!("B4 input: no SDF surface within ray range (50m)");
+            return;
+        };
+        center_half
     };
     let previous = editor.world.clone();
     let brush = Brush { center_half, radius_half: 6, mode };
