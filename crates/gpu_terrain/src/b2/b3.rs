@@ -99,10 +99,18 @@ impl Plugin for GpuTerrainB3Plugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        render_app
+        let mut settings = render_app
             .world_mut()
-            .resource_mut::<MeshAllocatorSettings>()
-            .extra_buffer_usages = BufferUsages::STORAGE;
+            .resource_mut::<MeshAllocatorSettings>();
+        settings.extra_buffer_usages = BufferUsages::STORAGE;
+        // B15.1: compare on/off under identical B14 instrumentation.
+        // Larger initial slabs/growth reduce GPU-produced mesh relocation,
+        // but increase reserved VRAM. No change unless explicitly selected.
+        if std::env::var("SANDBOX_B15_1_STABLE_SLABS").as_deref() == Ok("1") {
+            settings.slab_allocator_settings.min_slab_size = 16 * 1024 * 1024;
+            settings.slab_allocator_settings.growth_factor = 2.0;
+            info!("B15.1 stable GPU mesh slabs enabled (16 MiB min, growth 2x)");
+        }
     }
 }
 
