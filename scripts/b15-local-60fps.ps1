@@ -42,8 +42,16 @@ try {
     $game = Start-Process -FilePath $exe -WorkingDirectory $AppDir -PassThru -RedirectStandardOutput (Join-Path $session 'game.stdout.log') -RedirectStandardError (Join-Path $session 'game.stderr.log')
     Start-Sleep -Seconds 2
     if ($game.HasExited) { throw "Game exited early ($($game.ExitCode))" }
+    # B15.1: never record the 6000x1440 multi-monitor desktop (9.6 FPS in B15).
+    # FFmpeg gdigrab supports capturing exactly one window by title.
+    $game.Refresh()
+    $windowTitle = (Get-Process -Id $game.Id).MainWindowTitle
+    if ([string]::IsNullOrWhiteSpace($windowTitle)) {
+        throw 'Unable to locate an interactive game window; do not capture desktop.'
+    }
+    if ($windowTitle.Contains('"')) { throw 'Window title contains unsupported quotes.' }
     $recordingLaunch = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    $args = '-y -hide_banner -loglevel warning -f gdigrab -framerate {0} -draw_mouse 0 -i desktop -t {1} -c:v libx264 -preset ultrafast -crf 20 -pix_fmt yuv420p -movflags +faststart "{2}"' -f $Fps,$DurationSeconds,$video
+    $args = '-y -hide_banner -loglevel warning -f gdigrab -framerate {0} -draw_mouse 0 -i "title={1}" -t {2} -c:v libx264 -preset ultrafast -crf 20 -pix_fmt yuv420p -movflags +faststart "{3}"' -f $Fps,$windowTitle,$DurationSeconds,$video
     $capture = Start-Process -FilePath $ffmpeg.Source -ArgumentList $args -PassThru -RedirectStandardError (Join-Path $session 'ffmpeg.stderr.log') -RedirectStandardOutput (Join-Path $session 'ffmpeg.stdout.log')
     Write-Host "B15: recording desktop at $Fps FPS for $DurationSeconds seconds"
     Write-Host "B15: session $session"
@@ -54,8 +62,26 @@ try {
     if (-not (Test-Path -LiteralPath $video -PathType Leaf) -or (Get-Item -LiteralPath $video).Length -lt 100000) {
         throw "Video missing or too small: $video"
     }
+    $probe = Get-Command ffprobe.exe -ErrorAction SilentlyContinue
+    if (-not $probe) { throw 'ffprobe missing: FFmpeg installation incomplete' }
+    $probeOutput = & $probe.Source -v error -count_frames -select_streams v:0 -show_entries stream=nb_read_frames,duration,width,height -of json "$video"
+    if ($LASTEXITCODE -ne 0) { throw 'FFprobe failed to inspect captured video' }
+    $stream = @((($probeOutput -join "`n") | ConvertFrom-Json).streams)[0]
+    $actualFps = if ([double]$stream.duration -gt 0) {
+        [math]::Round(([double]$stream.nb_read_frames / [double]$stream.duration), 2)
+    } else { 0.0 }
+    $qualified = $actualFps -ge 50.0
+    if (-not $qualified) {
+        Write-Warning "B15.1 capture FPS insufficient for one-frame flicker claims: $actualFps"
+    }
     $metadata = [ordered]@{
         mode = $Mode
+        recording_window_title = $windowTitle
+        encoded_frames = [int]$stream.nb_read_frames
+        encoded_width = [int]$stream.width
+        encoded_height = [int]$stream.height
+        actual_recorded_fps = $actualFps
+        capture_qualified_50fps = $qualified
         stage = 'B11'
         camera_route = if ($Mode -eq 'Auto') { 'straight / 18mps' } else { 'interactive free flight' }
         fps_requested = $Fps
@@ -65,11 +91,12 @@ try {
         synchronization_uncertainty_ms = 1000
         recording = 'desktop-60fps.mp4'
         trace = 'trace/b14-frames.csv'
-        note = 'B14 timestamps are at main-world Last; FFmpeg records the desktop compositor. Match with +/- 1s uncertainty. Pixel anomalies are candidates only.'
+        note = 'B14 timestamps are at main-world Last; FFmpeg records the game window. Match with +/- 1s uncertainty. Pixel anomalies are candidates only.'
     }
     $metadata | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $session 'b15-recording.json') -Encoding UTF8
     $archive = "$session.zip"
     Compress-Archive -Path (Join-Path $session '*') -DestinationPath $archive -Force
+    Write-Host "B15_1_CAPTURE actual_fps=$actualFps resolution=$($stream.width)x$($stream.height) qualified=$qualified"
     Write-Host "B15_READY_FOR_CAUSAL_REVIEW: $archive"
 } finally {
     if ($capture) {
