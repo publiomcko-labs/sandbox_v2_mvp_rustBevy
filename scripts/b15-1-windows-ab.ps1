@@ -31,6 +31,8 @@ foreach ($arm in @('control','stable_slabs')) {
         [double]::Parse($_.game_t_s, [Globalization.CultureInfo]::InvariantCulture) -ge 20 -and [int]$_.missing -gt 0
     }).Count
     $finalLog = @($log -split '[\r\n]+' | Where-Object { $_ -match 'B3 horizon coverage' } | Select-Object -Last 1)
+    $lastHorizon = $null
+    if ($finalLog.Count -gt 0) { $lastHorizon = $finalLog[0] }
     $result = [ordered]@{
         arm = $arm
         scripted_edits = $scripted
@@ -38,7 +40,7 @@ foreach ($arm in @('control','stable_slabs')) {
         relocation_warning_frames = $relocations
         logical_frames = $frames.Count
         missing_logical_after20 = $after20
-        final_horizon_log = if ($finalLog.Count) { $finalLog[0] } else { $null }
+        final_horizon_log = $lastHorizon
     }
     $results += [pscustomobject]$result
     $result | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $dest 'B15_1_ARM.json') -Encoding UTF8
