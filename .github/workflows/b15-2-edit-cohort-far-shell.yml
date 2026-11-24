@@ -20,22 +20,9 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}\..\_b6_cargo_target
     steps:
       - uses: actions/checkout@v4
-      - name: Validate PowerShell scripts on Windows PowerShell 5.1
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          foreach ($script in @('scripts/b15-2-windows-matrix.ps1', 'scripts/b15-2-local-60fps.ps1')) {
-            $tokens = $null
-            $errors = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile(
-              (Join-Path $PWD $script), [ref]$tokens, [ref]$errors
-            )
-            if ($errors.Count -gt 0) {
-              $errors | ForEach-Object { Write-Error $_.ToString() }
-              throw "PowerShell parser failed: $script"
-            }
-            Write-Host "PARSER_PASS $script"
-          }
+      - name: Parse Windows PowerShell 5.1 scripts without executing them
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-2-parse-powershell.ps1"
       - name: Reuse Windows MSVC Rust environment
         shell: cmd
         env:
