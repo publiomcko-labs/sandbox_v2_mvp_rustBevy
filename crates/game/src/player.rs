@@ -75,8 +75,10 @@ pub fn fly_camera(
     });
     static B9_SURVEY: OnceLock<bool> = OnceLock::new();
     let survey = *B9_SURVEY.get_or_init(|| {
-        std::env::var("SANDBOX_STAGE").as_deref() == Ok("B9")
-            && std::env::var("SANDBOX_B9_TEST_ROUTE").as_deref() == Ok("survey")
+        (std::env::var("SANDBOX_STAGE").as_deref() == Ok("B9")
+            && std::env::var("SANDBOX_B9_TEST_ROUTE").as_deref() == Ok("survey"))
+            || (std::env::var("SANDBOX_STAGE").as_deref() == Ok("B11")
+                && std::env::var("SANDBOX_B15_1_ROUTE").as_deref() == Ok("survey"))
     });
     static B9_CREATIVE: OnceLock<bool> = OnceLock::new();
     let creative = *B9_CREATIVE.get_or_init(|| {
