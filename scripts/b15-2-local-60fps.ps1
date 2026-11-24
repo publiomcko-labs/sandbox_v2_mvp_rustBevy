@@ -96,6 +96,12 @@ try {
         throw "Unexpected window size: ${w}x${h}. Use a regular 1920x1080 window."
     }
     Write-Host "B15_2_WINDOW_REGION x=$x y=$y size=${w}x${h}"
+    if ($Mode -eq 'Auto') {
+        # The survey route holds the camera still for its first 12 game seconds.
+        # Wait until the scripted motion has begun before testing video dynamics.
+        Write-Host 'B15.2 AUTO: waiting for survey warmup to end before motion preflight.'
+        Start-Sleep -Seconds 12
+    }
     Write-Host 'PREFLIGHT: MOVE THE CAMERA OR WALK DURING THE NEXT 8 SECONDS.'
     $preArgs = '-y -hide_banner -loglevel error -f gdigrab -framerate 15 -draw_mouse 0 -offset_x {0} -offset_y {1} -video_size {2}x{3} -i desktop -t 8 -c:v libx264 -preset ultrafast -crf 26 -pix_fmt yuv420p "{4}"' -f $x,$y,$w,$h,$preflight
     $probeLog = Join-Path $session 'preflight-ffmpeg.log'
@@ -170,7 +176,10 @@ try {
         trace = 'trace/b14-frames.csv'
         caveat = 'Encoded FPS does not prove distinct presented frames: visually inspect the recorded movement and SDF changes.'
     }
-    $meta | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath (Join-Path $session 'b15-2-recording.json') -Encoding UTF8
+    $metadataJson = $meta | ConvertTo-Json -Depth 7
+    $metadataJson | Set-Content -LiteralPath (Join-Path $session 'b15-2-recording.json') -Encoding UTF8
+    # Keep the B15 temporal-video correlator usable without duplicating it.
+    $metadataJson | Set-Content -LiteralPath (Join-Path $session 'b15-recording.json') -Encoding UTF8
     Write-Host "B15_2_CAPTURE_FPS=$encodedFps qualified=$qualifies"
     # Flush B14 CSV and game logs before archiving the entire session.
     if ($game -and -not $game.HasExited) {
