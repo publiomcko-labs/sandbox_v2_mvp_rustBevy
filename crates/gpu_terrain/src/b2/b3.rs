@@ -573,22 +573,33 @@ fn begin_b15_2_edit_cohort(
             seam: seam_info(coord, &levels),
             revision: world.revision(coord),
         };
-        // Drop a pre-existing LOD-only replacement within the dependency
-        // closure: its packed neighbor tiers and density may now be stale.
-        if let Some(obsolete) = state.transition_pending.remove(&coord) {
-            commands.entity(obsolete.block.entity).despawn();
-            meshes.remove(obsolete.block.mesh.id());
-            if let Ok(mut set) = ready.0.lock() { set.remove(&obsolete.block.mesh.id()); }
-            canceled += 1;
+        // Preserve matching in-flight edit work across subsequent frames:
+        // dirty revisions remain visible until commit, so canceling on every
+        // frame would starve the edit forever. Cancel only stale LOD targets
+        // or a replacement with a different SDF/LOD/seam specification.
+        let queued = state.transition_target.get(&coord).copied();
+        let incompatible = state.transition_pending.get(&coord)
+            .is_some_and(|p| p.block.spec != desired);
+        let need_new = desired != active.spec;
+        let must_cancel = incompatible || (queued.is_some() && queued != Some(desired))
+            || (!need_new && queued.is_some());
+        if must_cancel {
+            if let Some(obsolete) = state.transition_pending.remove(&coord) {
+                commands.entity(obsolete.block.entity).despawn();
+                meshes.remove(obsolete.block.mesh.id());
+                if let Ok(mut set) = ready.0.lock() {
+                    set.remove(&obsolete.block.mesh.id());
+                }
+                canceled += 1;
+            }
+            if state.transition_target.remove(&coord).is_some() { canceled += 1; }
         }
-        if state.transition_target.remove(&coord).is_some() { canceled += 1; }
-        if desired != active.spec {
+        if need_new {
             state.transition_target.insert(coord, desired);
             state.edit_priority.insert(coord);
             repairs += 1;
         } else {
-            // This chunk continues rendering exactly the existing surface,
-            // so no replacement is necessary in the edit transaction.
+            // The old surface already satisfies this frozen LOD snapshot.
             state.edit_priority.remove(&coord);
         }
     }
