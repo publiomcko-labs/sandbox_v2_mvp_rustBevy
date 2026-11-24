@@ -77,6 +77,8 @@ struct BuildSdfMesh {
     seam_mask: u32,
     neighbor_lod_words: [u32; 2],
     brushes: Vec<Brush>,
+    // B15.1: interactive edit/revision work preempts visual LOD refinement.
+    priority: bool,
 }
 
 fn b2_counts(grid: DensityGrid) -> (usize, usize) {
@@ -148,6 +150,7 @@ fn setup_b2_scene(
                         seam_mask: 0,
                         neighbor_lod_words: [0; 2],
                         brushes: Vec::new(),
+                        priority: false,
                     },
                     Mesh3d(handle),
                     MeshMaterial3d(material.clone()),
@@ -361,31 +364,46 @@ fn prepare_b2(
         let active: HashSet<_> = commands.iter().map(|job| job.handle.id()).collect();
         resident.0.retain(|mesh_id, _| active.contains(mesh_id));
     }
-    // Unlike ordinary CPU-uploaded meshes, these slabs are written by GPU
-    // compute only once. If MeshAllocator relocates a live allocation, the
-    // new slab can contain missing or stale geometry while the MainWorld still
-    // reports GPU-ready. Validate the live GPU buffer *identity and offsets*
-    // each frame and re-emit extraction on the new allocation.
+    // B15.1: A moved slab no longer contains the compute-produced positions
+    // and indices. Recreate ALL relocated live meshes in the same render graph
+    // before camera_driver draws, independent of normal new-mesh quota.
+    // Otherwise MainWorld keeps them visible while a five-job backlog draws
+    // zero/stale GPU data; B15 logged 4954 such relocations.
+    let mut relocated = HashSet::new();
     if b3_ready.is_some() {
-        let moved: Vec<_> = resident.0.iter()
-            .filter_map(|(&mesh_id, resident_mesh)| {
-                let live = b12_current_slot(&allocator, mesh_id)?;
-                (live != resident_mesh.slot).then_some(mesh_id)
-            }).collect();
-        for mesh_id in moved {
-            resident.0.remove(&mesh_id);
-            warn!(?mesh_id,"B12 GPU mesh allocator relocation detected; rebuilding surface");
+        for (&mesh_id, resident_mesh) in &resident.0 {
+            if let Some(live) = b12_current_slot(&allocator, mesh_id) {
+                if live != resident_mesh.slot { relocated.insert(mesh_id); }
+            }
+        }
+        for mesh_id in &relocated {
+            resident.0.remove(mesh_id);
         }
     }
     pending.0.clear();
     let quota = if b3_ready.is_some() { 5 } else { usize::MAX };
-    pending.0.extend(
-        commands
-            .iter()
-            .filter(|job| !resident.0.contains_key(&job.handle.id()))
-            .take(quota)
-            .cloned(),
-    );
+    // Relocations are an emergency because their *visible* contents are
+    // invalid. Next, edits outrank newly streamed / visual LOD meshes.
+    let mut edit_jobs = Vec::new();
+    let mut normal_jobs = Vec::new();
+    for job in &commands {
+        if resident.0.contains_key(&job.handle.id()) { continue; }
+        if relocated.contains(&job.handle.id()) {
+            pending.0.push(job.clone());
+        } else if job.priority {
+            edit_jobs.push(job.clone());
+        } else {
+            normal_jobs.push(job.clone());
+        }
+    }
+    let remaining = quota.saturating_sub(pending.0.len());
+    pending.0.extend(edit_jobs.into_iter().take(remaining));
+    let remaining = quota.saturating_sub(pending.0.len());
+    pending.0.extend(normal_jobs.into_iter().take(remaining));
+    if !relocated.is_empty() && (*frame % 60 == 0 || relocated.len() > 12) {
+        warn!(relocations=relocated.len(), scheduled=pending.0.len(),
+            "B15.1 GPU relocated live meshes prioritized for same-frame re-extraction");
+    }
 }
 
 fn compute_b2(
