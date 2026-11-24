@@ -68,7 +68,6 @@ if ($Mode -eq 'Auto') {
     Remove-Item Env:SANDBOX_B3_ROUTE -ErrorAction SilentlyContinue
 }
 $game = $null
-$capture = $null
 try {
     $gameLaunch = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $game = Start-Process -FilePath $exe -WorkingDirectory $AppDir -PassThru `
@@ -147,14 +146,38 @@ try {
         Start-Sleep -Seconds 12
     }
     Write-Host 'PREFLIGHT: MOVE THE CAMERA OR WALK DURING THE NEXT 8 SECONDS.'
-    $preArgs = '-y -hide_banner -loglevel error -f gdigrab -framerate 15 -draw_mouse 0 -offset_x {0} -offset_y {1} -video_size {2}x{3} -i desktop -t 8 -c:v libx264 -preset ultrafast -crf 26 -pix_fmt yuv420p "{4}"' -f $x,$y,$w,$h,$preflight
+    # Match the direct interactive FFmpeg command proven to work on the
+    # user's Windows desktop. Start-Process/-WindowStyle Hidden was returning
+    # a failed preflight with an empty stderr file. Preserve *both* streams
+    # and the native exit code to distinguish launch from encoding failures.
     $probeLog = Join-Path $session 'preflight-ffmpeg.log'
-    $p = Start-Process -FilePath $ffmpeg.Source -ArgumentList $preArgs -PassThru -WindowStyle Hidden `
-        -RedirectStandardError $probeLog
-    Wait-Process -Id $p.Id -Timeout 40 -ErrorAction Stop
-    $p.Refresh()
-    if ($p.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $preflight)) {
-        throw "Preflight regional Vulkan capture failed; inspect $probeLog"
+    $oldErrorPreference = $ErrorActionPreference
+    $preflightExitCode = -999
+    try {
+        # Windows PowerShell 5.1 wraps native stderr records as errors;
+        # do not let informational FFmpeg output become a terminating error.
+        $ErrorActionPreference = 'Continue'
+        & $ffmpeg.Source -y -hide_banner -loglevel info `
+            -f gdigrab -framerate 15 -draw_mouse 0 `
+            -offset_x $x -offset_y $y -video_size "${w}x${h}" `
+            -i desktop -t 8 -c:v libx264 -preset ultrafast `
+            -crf 26 -pix_fmt yuv420p "$preflight" 2>&1 |
+            Out-File -LiteralPath $probeLog -Encoding UTF8
+        $preflightExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $oldErrorPreference
+    }
+    $preflightExists = Test-Path -LiteralPath $preflight -PathType Leaf
+    $preflightSize = 0L
+    if ($preflightExists) {
+        $preflightSize = (Get-Item -LiteralPath $preflight).Length
+    }
+    Write-Host "B15_2_PREFLIGHT_FFMPEG exit=$preflightExitCode bytes=$preflightSize log=$probeLog"
+    if ($preflightExitCode -ne 0 -or $preflightSize -lt 10000) {
+        $logTail = if (Test-Path -LiteralPath $probeLog) {
+            (Get-Content -LiteralPath $probeLog -Tail 12) -join ' | '
+        } else { 'no FFmpeg log' }
+        throw "B15_2_PREFLIGHT_ENCODING_FAILED exit=$preflightExitCode bytes=$preflightSize; $logTail"
     }
     $first = Join-Path $session 'preflight-first.gray'
     $last = Join-Path $session 'preflight-last.gray'
@@ -181,15 +204,34 @@ try {
     Write-Host "B15_2_PREFLIGHT_DYNAMIC_PASS mean_pixel_delta=$([math]::Round($delta,2))"
     Write-Host "B15.2 recording only the game region at $Fps FPS for $DurationSeconds seconds"
     $recordingLaunch = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    $args = '-y -hide_banner -loglevel warning -f gdigrab -framerate {0} -draw_mouse 0 -offset_x {1} -offset_y {2} -video_size {3}x{4} -i desktop -t {5} -c:v libx264 -preset ultrafast -crf 20 -pix_fmt yuv420p -movflags +faststart "{6}"' -f $Fps,$x,$y,$w,$h,$DurationSeconds,$video
-    $capture = Start-Process -FilePath $ffmpeg.Source -ArgumentList $args -PassThru -WindowStyle Hidden `
-        -RedirectStandardError (Join-Path $session 'ffmpeg.stderr.log') `
-        -RedirectStandardOutput (Join-Path $session 'ffmpeg.stdout.log')
-    Write-Host "Keep the game in the foreground; do not move, resize or cover the window."
-    Wait-Process -Id $capture.Id -Timeout ($DurationSeconds + 60) -ErrorAction Stop
-    $capture.Refresh()
-    if ($capture.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $video)) {
-        throw 'B15.2 FFmpeg recording failed'
+    $recordingLog = Join-Path $session 'ffmpeg.stderr.log'
+    Write-Host 'Keep the game in the foreground; do not move, resize or cover the window.'
+    $recordingExitCode = -999
+    $oldErrorPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $ffmpeg.Source -y -hide_banner -loglevel info `
+            -f gdigrab -framerate $Fps -draw_mouse 0 `
+            -offset_x $x -offset_y $y -video_size "${w}x${h}" `
+            -i desktop -t $DurationSeconds -c:v libx264 `
+            -preset ultrafast -crf 20 -pix_fmt yuv420p `
+            -movflags +faststart "$video" 2>&1 |
+            Out-File -LiteralPath $recordingLog -Encoding UTF8
+        $recordingExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $oldErrorPreference
+    }
+    $recordingExists = Test-Path -LiteralPath $video -PathType Leaf
+    $recordingSize = 0L
+    if ($recordingExists) {
+        $recordingSize = (Get-Item -LiteralPath $video).Length
+    }
+    Write-Host "B15_2_RECORDING_FFMPEG exit=$recordingExitCode bytes=$recordingSize"
+    if ($recordingExitCode -ne 0 -or $recordingSize -lt 100000) {
+        $logTail = if (Test-Path -LiteralPath $recordingLog) {
+            (Get-Content -LiteralPath $recordingLog -Tail 12) -join ' | '
+        } else { 'no FFmpeg log' }
+        throw "B15_2_RECORDING_FAILED exit=$recordingExitCode bytes=$recordingSize; $logTail"
     }
     $streamJson = & $ffprobe.Source -v error -count_frames -select_streams v:0 `
         -show_entries stream=nb_read_frames,duration,width,height -of json "$video"
@@ -234,9 +276,6 @@ try {
     Compress-Archive -Path (Join-Path $session '*') -DestinationPath $archive -Force
     Write-Host "B15_2_READY_FOR_REVIEW: $archive"
 } finally {
-    if ($capture) {
-        try { if (-not $capture.HasExited) { Stop-Process -Id $capture.Id -Force -ErrorAction SilentlyContinue } } catch {}
-    }
     if ($game) {
         try { if (-not $game.HasExited) { Stop-Process -Id $game.Id -Force -ErrorAction SilentlyContinue } } catch {}
     }
