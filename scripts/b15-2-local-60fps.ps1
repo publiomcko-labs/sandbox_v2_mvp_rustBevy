@@ -29,6 +29,9 @@ public struct B15_2_POINT { public int X, Y; }
 public static class B15_2DesktopRect {
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out B15_2_RECT rect);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hwnd, ref B15_2_POINT point);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out B15_2_RECT rect);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 }
 '@
@@ -71,31 +74,72 @@ try {
     $game = Start-Process -FilePath $exe -WorkingDirectory $AppDir -PassThru `
         -RedirectStandardOutput (Join-Path $session 'game.stdout.log') `
         -RedirectStandardError (Join-Path $session 'game.stderr.log')
+    # Do not trust the first non-zero MainWindowHandle: Winit/Bevy can
+    # create the native HWND before assigning the final drawable size.
+    # In B15.2's first local run, that race yielded a 0x0 client rect.
     $handle = [IntPtr]::Zero
-    for ($i = 0; $i -lt 40; $i++) {
+    $x = 0; $y = 0; $w = 0; $h = 0
+    $regionSource = ''
+    $lastProbe = 'no HWND yet'
+    for ($attempt = 0; $attempt -lt 120; $attempt++) {
         Start-Sleep -Milliseconds 250
         $game.Refresh()
         if ($game.HasExited) { throw "Game exited early ($($game.ExitCode))" }
         $handle = $game.MainWindowHandle
-        if ($handle -ne [IntPtr]::Zero) { break }
+        if ($handle -eq [IntPtr]::Zero) {
+            $lastProbe = 'no HWND yet'
+            continue
+        }
+        if ([B15_2DesktopRect]::IsIconic($handle)) {
+            $lastProbe = 'window minimized'
+            continue
+        }
+        if (-not [B15_2DesktopRect]::IsWindowVisible($handle)) {
+            $lastProbe = 'window exists but is not visible'
+            continue
+        }
+        $rect = New-Object B15_2_RECT
+        $point = New-Object B15_2_POINT
+        $clientValid = [B15_2DesktopRect]::GetClientRect($handle, [ref]$rect) -and
+            [B15_2DesktopRect]::ClientToScreen($handle, [ref]$point)
+        if ($clientValid) {
+            $w = [int]([math]::Floor(($rect.Right - $rect.Left) / 2.0) * 2)
+            $h = [int]([math]::Floor(($rect.Bottom - $rect.Top) / 2.0) * 2)
+            $x = [int]$point.X
+            $y = [int]$point.Y
+            if ($w -ge 640 -and $h -ge 360 -and $w -le 4096 -and $h -le 2160) {
+                $regionSource = 'client'
+                break
+            }
+            $lastProbe = "client=${w}x${h} hwnd=$handle"
+        } else {
+            $lastProbe = "GetClientRect/ClientToScreen failed hwnd=$handle"
+        }
+        # After 2s prefer a valid outer window rect over a persistently 0x0
+        # client; FFmpeg preflight still checks that real pixels change.
+        if ($attempt -ge 8) {
+            $outer = New-Object B15_2_RECT
+            if ([B15_2DesktopRect]::GetWindowRect($handle, [ref]$outer)) {
+                $outerW = [int]([math]::Floor(($outer.Right - $outer.Left) / 2.0) * 2)
+                $outerH = [int]([math]::Floor(($outer.Bottom - $outer.Top) / 2.0) * 2)
+                if ($outerW -ge 640 -and $outerH -ge 360 -and
+                    $outerW -le 4096 -and $outerH -le 2160) {
+                    $x = [int]$outer.Left
+                    $y = [int]$outer.Top
+                    $w = $outerW
+                    $h = $outerH
+                    $regionSource = 'outer-window-fallback'
+                    Write-Warning 'B15.2: client rect not ready; using window bounds (including borders).'
+                    break
+                }
+                $lastProbe += " outer=${outerW}x${outerH}"
+            }
+        }
     }
-    if ($handle -eq [IntPtr]::Zero) {
-        throw 'Game window handle unavailable: interactive Windows desktop is required'
+    if ($regionSource -eq '') {
+        throw "B15_2_WINDOW_NOT_READY: no valid game region after 30s; last=$lastProbe. Restore the game window and inspect the latest game.stderr.log under $session"
     }
-    $rect = New-Object B15_2_RECT
-    $point = New-Object B15_2_POINT
-    if (-not [B15_2DesktopRect]::GetClientRect($handle, [ref]$rect) -or
-        -not [B15_2DesktopRect]::ClientToScreen($handle, [ref]$point)) {
-        throw 'Failed to get Vulkan window client rectangle'
-    }
-    $x = [int]$point.X
-    $y = [int]$point.Y
-    $w = [int]([math]::Floor(($rect.Right - $rect.Left) / 2.0) * 2)
-    $h = [int]([math]::Floor(($rect.Bottom - $rect.Top) / 2.0) * 2)
-    if ($w -lt 640 -or $h -lt 360 -or $w -gt 4096 -or $h -gt 2160) {
-        throw "Unexpected window size: ${w}x${h}. Use a regular 1920x1080 window."
-    }
-    Write-Host "B15_2_WINDOW_REGION x=$x y=$y size=${w}x${h}"
+    Write-Host "B15_2_WINDOW_REGION x=$x y=$y size=${w}x${h} source=$regionSource"
     if ($Mode -eq 'Auto') {
         # The survey route holds the camera still for its first 12 game seconds.
         # Wait until the scripted motion has begun before testing video dynamics.
