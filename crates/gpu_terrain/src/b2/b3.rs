@@ -240,6 +240,12 @@ struct StreamWorld {
     atomic_publication_errors: u64,
     lod_audited_frames: u64,
     lod_bad_frames: u64,
+    b15_2_atomic_edits: bool,
+    b15_2_edit_transactions: u64,
+    b15_2_cancelled_lod_jobs: u64,
+    b15_2_edit_cohort_blocks: u64,
+    b15_2_post_edit_repair_blocks: u64,
+    b15_2_last_edit_frame: Option<u64>,
 }
 
 fn setup_b3_scene(
@@ -250,6 +256,11 @@ fn setup_b3_scene(
     mut editor: ResMut<B4EditState>,
 ) {
     state.baseline_scheduler = std::env::var("SANDBOX_B3_SCHEDULER").as_deref() == Ok("baseline");
+    // Default ON only in B15.2 experimental source; opt out for matched A/B.
+    state.b15_2_atomic_edits =
+        std::env::var("SANDBOX_B15_2_EDIT_ATOMIC").as_deref() != Ok("0");
+    info!(atomic_edits=state.b15_2_atomic_edits,
+        "B15.2 SDF+LOD seam transactional publication configuration");
     let stage = std::env::var("SANDBOX_STAGE").unwrap_or_default();
     editor.enabled = matches!(stage.as_str(), "B4" | "B5" | "B6" | "B7" | "B8" | "B9" | "B11")
         || std::env::var("SANDBOX_B4_ENABLE").as_deref() == Ok("1");
@@ -508,8 +519,85 @@ fn reconcile_lod_seams(
             }
         }
     }
+    if state.b15_2_atomic_edits
+        && state.b15_2_last_edit_frame.is_some_and(|f| state.frame.saturating_sub(f) <= 20)
+    {
+        state.b15_2_post_edit_repair_blocks += repairs.len() as u64;
+    }
     info!(repair_count=repairs.len(),
         "B15.1 stale LOD seam metadata queued for coherent regeneration");
+}
+
+/// B15.2: a persisted edit invalidates GPU density over its affected chunks,
+/// and an in-flight LOD transaction may have planned neighboring seams against
+/// different LODs. Restore a *single published LOD snapshot* within the 3x3x3
+/// seam dependency closure, cancel the conflicting in-flight LOD replacements,
+/// then publish all edited/seam-repair meshes as one GPU-ready cohort.
+/// This does not allocate a GPU fence or promise presentation-time completion.
+fn begin_b15_2_edit_cohort(
+    state: &mut StreamWorld,
+    dirty: &[(BlockCoord, LodSpec)],
+    world: &WorldEdits,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    ready: &B3ReadySet,
+) {
+    if dirty.is_empty() { return; }
+    let levels: HashMap<BlockCoord, u8> = state.blocks.iter()
+        .map(|(&coord, block)| (coord, block.spec.lod)).collect();
+    let mut closure = HashSet::new();
+    for (coord, _) in dirty {
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    closure.insert(BlockCoord {
+                        x: coord.x + dx,
+                        y: coord.y + dy,
+                        z: coord.z + dz,
+                    });
+                }
+            }
+        }
+    }
+    // Existing unfinished edit cohorts must not be committed separately if
+    // another click updates their SDF revisions before the GPU publication.
+    closure.extend(state.edit_priority.iter().copied());
+    let mut coords: Vec<_> = closure.into_iter().collect();
+    coords.sort_by_key(|c| (c.x, c.y, c.z));
+    let mut canceled = 0u64;
+    let mut repairs = 0u64;
+    for coord in coords {
+        let Some(active) = state.blocks.get(&coord) else { continue; };
+        let desired = LodSpec {
+            lod: active.spec.lod,
+            seam: seam_info(coord, &levels),
+            revision: world.revision(coord),
+        };
+        // Drop a pre-existing LOD-only replacement within the dependency
+        // closure: its packed neighbor tiers and density may now be stale.
+        if let Some(obsolete) = state.transition_pending.remove(&coord) {
+            commands.entity(obsolete.block.entity).despawn();
+            meshes.remove(obsolete.block.mesh.id());
+            if let Ok(mut set) = ready.0.lock() { set.remove(&obsolete.block.mesh.id()); }
+            canceled += 1;
+        }
+        if state.transition_target.remove(&coord).is_some() { canceled += 1; }
+        if desired != active.spec {
+            state.transition_target.insert(coord, desired);
+            state.edit_priority.insert(coord);
+            repairs += 1;
+        } else {
+            // This chunk continues rendering exactly the existing surface,
+            // so no replacement is necessary in the edit transaction.
+            state.edit_priority.remove(&coord);
+        }
+    }
+    state.b15_2_edit_transactions += 1;
+    state.b15_2_cancelled_lod_jobs += canceled;
+    state.b15_2_edit_cohort_blocks += repairs;
+    state.b15_2_last_edit_frame = Some(state.frame);
+    info!(frame=state.frame, dirty=dirty.len(), cohort=repairs, canceled,
+        "B15.2 edit and seam cohort queued atomically");
 }
 
 /// B8 render-topology audit over PUBLISHED and GPU-ready blocks only.
@@ -612,14 +700,24 @@ fn stream_b3(
             revision,
         }))
     }).collect();
-    for (coord, spec) in dirty {
-        state.edit_priority.insert(coord);
-        if state.transition_target.get(&coord) != Some(&spec) {
-            state.transition_target.insert(coord, spec);
-            if let Some(obsolete) = state.transition_pending.remove(&coord) {
-                commands.entity(obsolete.block.entity).despawn();
-                meshes.remove(obsolete.block.mesh.id());
-                if let Ok(mut set) = ready.0.lock() { set.remove(&obsolete.block.mesh.id()); }
+    if state.b15_2_atomic_edits {
+        begin_b15_2_edit_cohort(
+            &mut state, &dirty, &editor.world, &mut commands, &mut meshes, &ready,
+        );
+    } else {
+        // B15.1 comparison arm: reconstruct the affected chunk separately,
+        // then defer seam reconciliation until after its publication.
+        for (coord, spec) in dirty {
+            state.edit_priority.insert(coord);
+            if state.transition_target.get(&coord) != Some(&spec) {
+                state.transition_target.insert(coord, spec);
+                if let Some(obsolete) = state.transition_pending.remove(&coord) {
+                    commands.entity(obsolete.block.entity).despawn();
+                    meshes.remove(obsolete.block.mesh.id());
+                    if let Ok(mut set) = ready.0.lock() {
+                        set.remove(&obsolete.block.mesh.id());
+                    }
+                }
             }
         }
     }
@@ -641,9 +739,10 @@ fn stream_b3(
             connected_ready_components(&state.transition_target, &state.transition_pending)
         };
         for cohort in cohorts {
-            if critical.is_empty() && !cohort_seams_valid(
-                &cohort, &state.blocks, &state.transition_pending
-            ) {
+            if (critical.is_empty() || state.b15_2_atomic_edits)
+                && !cohort_seams_valid(
+                    &cohort, &state.blocks, &state.transition_pending
+                ) {
                 // Neighbors may have streamed in since the transaction was
                 // prepared. Hold the old valid geometry and reconcile next.
                 continue;
@@ -911,6 +1010,11 @@ fn stream_b3(
             atomic_publication_errors=state.atomic_publication_errors,
             lod_bad_frames=state.lod_bad_frames,
             lod_audited_frames=state.lod_audited_frames,
+            b15_2_atomic_edits=state.b15_2_atomic_edits,
+            b15_2_edit_transactions=state.b15_2_edit_transactions,
+            b15_2_cancelled_lod_jobs=state.b15_2_cancelled_lod_jobs,
+            b15_2_edit_cohort_blocks=state.b15_2_edit_cohort_blocks,
+            b15_2_post_edit_repair_blocks=state.b15_2_post_edit_repair_blocks,
             "B3 horizon coverage (130m, two vertical layers, GPU mesh ready)"
         );
         if required > visible {
