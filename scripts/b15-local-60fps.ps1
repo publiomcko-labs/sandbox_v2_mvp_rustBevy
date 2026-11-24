@@ -53,7 +53,7 @@ try {
     $recordingLaunch = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $args = '-y -hide_banner -loglevel warning -f gdigrab -framerate {0} -draw_mouse 0 -i "title={1}" -t {2} -c:v libx264 -preset ultrafast -crf 20 -pix_fmt yuv420p -movflags +faststart "{3}"' -f $Fps,$windowTitle,$DurationSeconds,$video
     $capture = Start-Process -FilePath $ffmpeg.Source -ArgumentList $args -PassThru -RedirectStandardError (Join-Path $session 'ffmpeg.stderr.log') -RedirectStandardOutput (Join-Path $session 'ffmpeg.stdout.log')
-    Write-Host "B15: recording desktop at $Fps FPS for $DurationSeconds seconds"
+    Write-Host "B15.1: recording game window at $Fps FPS for $DurationSeconds seconds"
     Write-Host "B15: session $session"
     Write-Host 'Keep the game foreground and do not move or resize the window.'
     Wait-Process -Id $capture.Id -Timeout ($DurationSeconds + 60) -ErrorAction Stop
@@ -74,6 +74,7 @@ try {
     if (-not $qualified) {
         Write-Warning "B15.1 capture FPS insufficient for one-frame flicker claims: $actualFps"
     }
+    $routeDescription = if ($Mode -eq 'Auto') { 'straight / 18mps' } else { 'interactive free flight' }
     $metadata = [ordered]@{
         mode = $Mode
         recording_window_title = $windowTitle
@@ -83,7 +84,7 @@ try {
         actual_recorded_fps = $actualFps
         capture_qualified_50fps = $qualified
         stage = 'B11'
-        camera_route = if ($Mode -eq 'Auto') { 'straight / 18mps' } else { 'interactive free flight' }
+        camera_route = $routeDescription
         fps_requested = $Fps
         requested_seconds = $DurationSeconds
         game_launch_unix_ms = $launched
