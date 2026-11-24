@@ -44,7 +44,7 @@ foreach ($arm in @('control','stable_slabs')) {
     $result | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $dest 'B15_1_ARM.json') -Encoding UTF8
     $result | Format-List | Out-String | Write-Host
     if ($scripted -ne 6) { throw "B15.1 expected six scripted edits in $arm, found $scripted" }
-    if ($published -lt 6) { throw "B15.1 edited mesh publication incomplete for $arm: $published" }
+    if ($published -lt 6) { throw "B15.1 edited mesh publication incomplete for ${arm}: $published" }
     if ($frames.Count -lt 1000) { throw "B15.1 per-frame audit missing in $arm" }
 }
 $results | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $out 'B15_1_AB_SUMMARY.json') -Encoding UTF8
