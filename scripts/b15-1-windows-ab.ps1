@@ -6,12 +6,14 @@ $out = Join-Path $root 'b15-1-evidence'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $env:SANDBOX_B15_1_SCRIPTED_EDITS = '1'
 $results = @()
-foreach ($arm in @('control','stable_slabs')) {
-    if ($arm -eq 'stable_slabs') {
+foreach ($arm in @('control','stable_slabs','survey')) {
+    if ($arm -eq 'stable_slabs' -or $arm -eq 'survey') {
         $env:SANDBOX_B15_1_STABLE_SLABS = '1'
     } else {
         $env:SANDBOX_B15_1_STABLE_SLABS = '0'
     }
+    if ($arm -eq 'survey') { $env:SANDBOX_B15_1_ROUTE = 'survey' }
+    else { Remove-Item Env:SANDBOX_B15_1_ROUTE -ErrorAction SilentlyContinue }
     $baseline = Join-Path $root 'b14-evidence'
     if (Test-Path -LiteralPath $baseline) { Remove-Item -LiteralPath $baseline -Recurse -Force }
     Write-Host "B15_1_AB_START $arm"
@@ -47,6 +49,16 @@ foreach ($arm in @('control','stable_slabs')) {
     $relocations = 0
     foreach ($match in $repairGroups) { $relocations += [int]$match.Groups[1].Value }
     $seamErrors = [regex]::Matches($log, 'B8 published mixed LOD seam topology violation').Count
+    $latencyMatches = [regex]::Matches($log, '(?:B4 revised GPU mesh ready for publication|B15\.1 new edited GPU chunk ready for publication)[^\r\n]*latency_ms=([0-9.]+)')
+    $latencies = @($latencyMatches | ForEach-Object {
+        [double]::Parse($_.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture)
+    })
+    $maxLatency = 0.0
+    $slowEdits = 0
+    foreach ($l in $latencies) {
+        if ($l -gt $maxLatency) { $maxLatency = $l }
+        if ($l -gt 100.0) { $slowEdits += 1 }
+    }
     $frames = @(Import-Csv -LiteralPath (Join-Path $dest 'trace\b14-frames.csv'))
     $after20 = @($frames | Where-Object {
         [double]::Parse($_.game_t_s, [Globalization.CultureInfo]::InvariantCulture) -ge 20 -and [int]$_.missing -gt 0
@@ -60,6 +72,8 @@ foreach ($arm in @('control','stable_slabs')) {
         arm = $arm
         scripted_edits = $scripted
         edited_block_publications = $published
+        slow_edits_over100ms = $slowEdits
+        max_edit_publication_ms = [math]::Round($maxLatency, 2)
         relocated_gpu_meshes = $relocations
         seam_runtime_errors = $seamErrors
         lod_bad_frames = $lodBadFrames
@@ -79,4 +93,7 @@ $results | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $out 'B
 if (@($results | Where-Object { $_.seam_runtime_errors -gt 0 -or $_.lod_bad_frames -gt 0 }).Count -gt 0) {
     throw 'B15_1_LOD_SEAM_HOLD: artifacts complete, seam topology violation remains'
 }
-Write-Host 'B15_1_WINDOWS_VULKAN_AB_PASS_VISUAL_REVIEW_PENDING'
+if (@($results | Where-Object { $_.slow_edits_over100ms -gt 0 }).Count -gt 0) {
+    throw 'B15_1_EDIT_LATENCY_HOLD: at least one publication exceeded 100 ms'
+}
+Write-Host 'B15_1_WINDOWS_VULKAN_AB_SURVEY_PASS_VISUAL_REVIEW_PENDING'
