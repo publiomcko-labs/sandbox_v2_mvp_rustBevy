@@ -577,16 +577,17 @@ fn begin_b15_2_edit_cohort(
             seam: seam_info(coord, &levels),
             revision: world.revision(coord),
         };
-        // Preserve matching in-flight edit work across subsequent frames:
-        // dirty revisions remain visible until commit, so canceling on every
-        // frame would starve the edit forever. Cancel only stale LOD targets
-        // or a replacement with a different SDF/LOD/seam specification.
+        // Only invalidate an in-flight LOD mesh when this chunk actually
+        // needs a new edit revision or new visible-neighbor seam. Unaffected
+        // neighbors must KEEP their valid LOD transactions: eagerly
+        // canceling the entire 3x3x3 neighborhood caused excessive rebuilds
+        // and post-edit seam repair churn in the first B15.2 A/B.
         let queued = state.transition_target.get(&coord).copied();
-        let incompatible = state.transition_pending.get(&coord)
-            .is_some_and(|p| p.block.spec != desired);
         let need_new = desired != active.spec;
-        let must_cancel = incompatible || (queued.is_some() && queued != Some(desired))
-            || (!need_new && queued.is_some());
+        let incompatible = need_new && state.transition_pending.get(&coord)
+            .is_some_and(|p| p.block.spec != desired);
+        let must_cancel = need_new && (incompatible
+            || (queued.is_some() && queued != Some(desired)));
         if must_cancel {
             if let Some(obsolete) = state.transition_pending.remove(&coord) {
                 commands.entity(obsolete.block.entity).despawn();
