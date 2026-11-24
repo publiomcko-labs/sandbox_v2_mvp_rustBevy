@@ -400,8 +400,8 @@ fn prepare_b2(
     pending.0.extend(edit_jobs.into_iter().take(remaining));
     let remaining = quota.saturating_sub(pending.0.len());
     pending.0.extend(normal_jobs.into_iter().take(remaining));
-    if !relocated.is_empty() && (*frame % 60 == 0 || relocated.len() > 12) {
-        warn!(relocations=relocated.len(), scheduled=pending.0.len(),
+    if !relocated.is_empty() {
+        info!(relocations=relocated.len(), scheduled=pending.0.len(),
             "B15.1 GPU relocated live meshes prioritized for same-frame re-extraction");
     }
 }
