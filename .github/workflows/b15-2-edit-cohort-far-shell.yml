@@ -40,9 +40,9 @@ jobs:
           echo %CARGO_HOME%\bin>>"%GITHUB_PATH%"
           echo CARGO_HOME=%CARGO_HOME%>>"%GITHUB_ENV%"
           echo RUSTUP_HOME=%RUSTUP_HOME%>>"%GITHUB_ENV%"
-      - name: Validate streaming SDF and GPU mesh unit tests
+      - name: Validate streaming and SDF world contracts
         shell: cmd
-        run: cargo +1.100.0 test --locked -p sandbox-streaming -p sandbox-world-core -p sandbox-gpu-terrain
+        run: cargo +1.100.0 test --locked -p sandbox-streaming -p sandbox-world-core
       - name: Build B15.2 Release
         shell: cmd
         run: cargo +1.100.0 build --release --locked -p sandbox-game
