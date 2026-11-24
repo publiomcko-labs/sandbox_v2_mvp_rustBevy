@@ -15,7 +15,25 @@ foreach ($arm in @('control','stable_slabs')) {
     $baseline = Join-Path $root 'b14-evidence'
     if (Test-Path -LiteralPath $baseline) { Remove-Item -LiteralPath $baseline -Recurse -Force }
     Write-Host "B15_1_AB_START $arm"
-    & (Join-Path $PSScriptRoot 'b14-headless-visibility-smoke.ps1')
+    # Collect both arms even if the known pre-existing seam topology
+    # detector fires: evidence must be retained and the final gate will fail.
+    $knownSeamViolation = $false
+    try {
+        & (Join-Path $PSScriptRoot 'b14-headless-visibility-smoke.ps1')
+    } catch {
+        $errLogPath = Join-Path $baseline 'stderr.log'
+        if (-not (Test-Path -LiteralPath $errLogPath)) { throw }
+        $errLog = (Get-Content -LiteralPath $errLogPath -Raw) -replace '\x1b\[[0-9;]*m',''
+        $runtimeErrors = @($errLog -split '[\r\n]+' | Where-Object {
+            $_ -match '(?i)\bERROR\b|Validation Error|panicked'
+        })
+        $unknownErrors = @($runtimeErrors | Where-Object {
+            $_ -notmatch 'B8 published mixed LOD seam topology violation'
+        })
+        if ($runtimeErrors.Count -eq 0 -or $unknownErrors.Count -gt 0) { throw }
+        $knownSeamViolation = $true
+        Write-Warning "B15.1 captured known LOD seam topology violation in $arm; continue for A/B evidence"
+    }
     if (-not (Test-Path -LiteralPath $baseline -PathType Container)) {
         throw "Missing B14 evidence for $arm"
     }
@@ -25,7 +43,10 @@ foreach ($arm in @('control','stable_slabs')) {
     $log = (Get-Content -LiteralPath (Join-Path $dest 'stderr.log') -Raw) -replace '\x1b\[[0-9;]*m',''
     $scripted = [regex]::Matches($log, 'B15\.1 scripted edit requested').Count
     $published = [regex]::Matches($log, 'B4 revised GPU mesh ready for publication|B15\.1 new edited GPU chunk ready for publication').Count
-    $relocations = [regex]::Matches($log, 'B15\.1 GPU relocated live meshes prioritized').Count
+    $repairGroups = [regex]::Matches($log, 'B15\.1 GPU relocated live meshes prioritized[^\r\n]*relocations=(\d+)')
+    $relocations = 0
+    foreach ($match in $repairGroups) { $relocations += [int]$match.Groups[1].Value }
+    $seamErrors = [regex]::Matches($log, 'B8 published mixed LOD seam topology violation').Count
     $frames = @(Import-Csv -LiteralPath (Join-Path $dest 'trace\b14-frames.csv'))
     $after20 = @($frames | Where-Object {
         [double]::Parse($_.game_t_s, [Globalization.CultureInfo]::InvariantCulture) -ge 20 -and [int]$_.missing -gt 0
@@ -33,11 +54,16 @@ foreach ($arm in @('control','stable_slabs')) {
     $finalLog = @($log -split '[\r\n]+' | Where-Object { $_ -match 'B3 horizon coverage' } | Select-Object -Last 1)
     $lastHorizon = $null
     if ($finalLog.Count -gt 0) { $lastHorizon = $finalLog[0] }
+    $lodBadFrames = 0
+    if ($lastHorizon -match 'lod_bad_frames=(\d+)') { $lodBadFrames = [int]$Matches[1] }
     $result = [ordered]@{
         arm = $arm
         scripted_edits = $scripted
         edited_block_publications = $published
-        relocation_warning_frames = $relocations
+        relocated_gpu_meshes = $relocations
+        seam_runtime_errors = $seamErrors
+        lod_bad_frames = $lodBadFrames
+        known_lod_seam_exception = $knownSeamViolation
         logical_frames = $frames.Count
         missing_logical_after20 = $after20
         final_horizon_log = $lastHorizon
@@ -50,4 +76,7 @@ foreach ($arm in @('control','stable_slabs')) {
     if ($frames.Count -lt 1000) { throw "B15.1 per-frame audit missing in $arm" }
 }
 $results | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $out 'B15_1_AB_SUMMARY.json') -Encoding UTF8
+if (@($results | Where-Object { $_.seam_runtime_errors -gt 0 -or $_.lod_bad_frames -gt 0 }).Count -gt 0) {
+    throw 'B15_1_LOD_SEAM_HOLD: artifacts complete, seam topology violation remains'
+}
 Write-Host 'B15_1_WINDOWS_VULKAN_AB_PASS_VISUAL_REVIEW_PENDING'
