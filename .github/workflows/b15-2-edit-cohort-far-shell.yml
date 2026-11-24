@@ -1,0 +1,86 @@
+name: B15.2 transactional edits and B11 far-shell isolation Windows Vulkan
+on:
+  push:
+    branches:
+      - 'fix/b15-2-edit-cohort-far-coverage-20261124'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: b15-2-edits-far-shell
+  cancel-in-progress: true
+jobs:
+  windows-vulkan-matrix:
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      CARGO_TARGET_DIR: ${{ github.workspace }}\..\_b6_cargo_target
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate PowerShell scripts on Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($script in @('scripts/b15-2-windows-matrix.ps1', 'scripts/b15-2-local-60fps.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $PWD $script), [ref]$tokens, [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_.ToString() }
+              throw "PowerShell parser failed: $script"
+            }
+            Write-Host "PARSER_PASS $script"
+          }
+      - name: Reuse Windows MSVC Rust environment
+        shell: cmd
+        env:
+          CARGO_HOME: ${{ runner.temp }}\b0-cargo
+          RUSTUP_HOME: ${{ runner.temp }}\b0-rustup
+        run: |
+          if not exist "%CARGO_HOME%\bin\rustup.exe" (
+            curl.exe --proto =https --tlsv1.2 --retry 3 -fL -o "%RUNNER_TEMP%\rustup-init.exe" https://win.rustup.rs/x86_64
+            if errorlevel 1 exit /b 1
+            "%RUNNER_TEMP%\rustup-init.exe" -y --no-modify-path --default-toolchain none
+            if errorlevel 1 exit /b 1
+          )
+          "%CARGO_HOME%\bin\rustup.exe" toolchain install 1.100.0 --profile minimal --no-self-update
+          if errorlevel 1 exit /b 1
+          echo %CARGO_HOME%\bin>>"%GITHUB_PATH%"
+          echo CARGO_HOME=%CARGO_HOME%>>"%GITHUB_ENV%"
+          echo RUSTUP_HOME=%RUSTUP_HOME%>>"%GITHUB_ENV%"
+      - name: Validate streaming SDF and GPU mesh unit tests
+        shell: cmd
+        run: cargo +1.100.0 test --locked -p sandbox-streaming -p sandbox-world-core -p sandbox-gpu-terrain
+      - name: Build B15.2 Release
+        shell: cmd
+        run: cargo +1.100.0 build --release --locked -p sandbox-game
+      - name: Package Windows Vulkan executable and original shaders
+        shell: cmd
+        run: |
+          if not exist "b14-runtime\assets" mkdir "b14-runtime\assets"
+          copy /Y "%CARGO_TARGET_DIR%\release\sandbox-game.exe" "b14-runtime\sandbox-game.exe"
+          if errorlevel 1 exit /b 1
+          xcopy /E /I /Y "assets\shaders" "b14-runtime\assets\shaders"
+          if errorlevel 1 exit /b 1
+      - name: Three-arm Vulkan edit and visual-shell comparison
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-2-windows-matrix.ps1"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b15-2-vulkan-matrix-evidence
+          path: |
+            b15-2-evidence/
+            b14-evidence/
+          if-no-files-found: warn
+      - if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b15-2-windows-release
+          path: b14-runtime/
+          if-no-files-found: error
