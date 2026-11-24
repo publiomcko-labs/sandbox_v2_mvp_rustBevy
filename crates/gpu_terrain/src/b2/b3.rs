@@ -543,6 +543,10 @@ fn begin_b15_2_edit_cohort(
     ready: &B3ReadySet,
 ) {
     if dirty.is_empty() { return; }
+    let fresh_edit = dirty.iter().any(|(coord, spec)| {
+        state.transition_target.get(coord)
+            .is_none_or(|target| target.revision != spec.revision)
+    });
     let levels: HashMap<BlockCoord, u8> = state.blocks.iter()
         .map(|(&coord, block)| (coord, block.spec.lod)).collect();
     let mut closure = HashSet::new();
@@ -603,12 +607,14 @@ fn begin_b15_2_edit_cohort(
             state.edit_priority.remove(&coord);
         }
     }
-    state.b15_2_edit_transactions += 1;
+    if fresh_edit {
+        state.b15_2_edit_transactions += 1;
+        state.b15_2_last_edit_frame = Some(state.frame);
+        info!(frame=state.frame, dirty=dirty.len(), cohort=repairs, canceled,
+            "B15.2 edit and seam cohort queued atomically");
+    }
     state.b15_2_cancelled_lod_jobs += canceled;
-    state.b15_2_edit_cohort_blocks += repairs;
-    state.b15_2_last_edit_frame = Some(state.frame);
-    info!(frame=state.frame, dirty=dirty.len(), cohort=repairs, canceled,
-        "B15.2 edit and seam cohort queued atomically");
+    if fresh_edit { state.b15_2_edit_cohort_blocks += repairs; }
 }
 
 /// B8 render-topology audit over PUBLISHED and GPU-ready blocks only.
