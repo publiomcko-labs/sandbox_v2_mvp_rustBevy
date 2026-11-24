@@ -421,6 +421,97 @@ fn connected_ready_components(
     ready
 }
 
+/// B15.1: a streamed LOD2 block cannot always assume uniform neighbors:
+/// visible LOD1 geometry may already have been refined in that direction.
+fn initial_stream_seam(
+    coord: BlockCoord,
+    blocks: &HashMap<BlockCoord, ActiveBlock>,
+) -> SeamInfo {
+    let mut levels = HashMap::new();
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                let neighbor = BlockCoord {
+                    x: coord.x + dx, y: coord.y + dy, z: coord.z + dz,
+                };
+                if let Some(active) = blocks.get(&neighbor) {
+                    levels.insert(neighbor, active.spec.lod);
+                }
+            }
+        }
+    }
+    levels.insert(coord, STREAM_LOD);
+    seam_info(coord, &levels)
+}
+
+/// A LOD cohort must not publish an incomplete seam against blocks that
+/// stay visible. Edit-only cohorts preserve the active LOD and are not
+/// blocked by pre-existing seam defects elsewhere.
+fn cohort_seams_valid(
+    cohort: &[BlockCoord],
+    blocks: &HashMap<BlockCoord, ActiveBlock>,
+    pending: &HashMap<BlockCoord, PendingUpgrade>,
+) -> bool {
+    let mut specs: HashMap<BlockCoord, LodSpec> = blocks.iter()
+        .filter_map(|(&coord, block)| block.visible.then_some((coord, block.spec)))
+        .collect();
+    for &coord in cohort {
+        let Some(replacement) = pending.get(&coord) else { return false; };
+        specs.insert(coord, replacement.block.spec);
+    }
+    for &coord in cohort {
+        for (axis, delta) in [(0, [1, 0, 0]), (1, [0, 1, 0]), (2, [0, 0, 1]),
+                               (0, [-1, 0, 0]), (1, [0, -1, 0]), (2, [0, 0, -1])] {
+            let neighbor = BlockCoord { x: coord.x + delta[0], y: coord.y + delta[1], z: coord.z + delta[2] };
+            let (positive, negative) = if delta[axis] > 0 { (neighbor, coord) } else { (coord, neighbor) };
+            let (Some(plus), Some(minus)) = (specs.get(&positive), specs.get(&negative)) else { continue; };
+            let difference = plus.lod.abs_diff(minus.lod);
+            let bit = 1u32 << axis;
+            if difference > 1 || (difference > 0 && plus.seam.negative_face_mask & bit == 0) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Reconcile seam metadata with the *planned* LOD snapshot, including new
+/// streamed blocks that appeared after an earlier LOD transaction began.
+/// Obsolete pending GPU meshes are invalidated, never published with stale
+/// neighborhood mask data.
+fn reconcile_lod_seams(
+    state: &mut StreamWorld,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    ready: &B3ReadySet,
+) {
+    if !state.mixed_lod || !state.edit_priority.is_empty() { return; }
+    let levels: HashMap<_,_> = state.blocks.iter()
+        .map(|(&coord, block)| (coord, state.transition_target.get(&coord)
+            .map_or(block.spec.lod, |spec| spec.lod))).collect();
+    let repairs: Vec<_> = state.blocks.iter().filter_map(|(&coord, block)| {
+        if !block.visible { return None; }
+        let proposed = state.transition_target.get(&coord).copied().unwrap_or(block.spec);
+        let required = seam_info(coord, &levels);
+        (proposed.seam != required).then_some((
+            coord, LodSpec { seam: required, ..proposed }
+        ))
+    }).collect();
+    if repairs.is_empty() { return; }
+    for (coord, spec) in repairs.iter().copied() {
+        state.transition_target.insert(coord, spec);
+        if let Some(obsolete) = state.transition_pending.remove(&coord) {
+            commands.entity(obsolete.block.entity).despawn();
+            meshes.remove(obsolete.block.mesh.id());
+            if let Ok(mut set) = ready.0.lock() {
+                set.remove(&obsolete.block.mesh.id());
+            }
+        }
+    }
+    info!(repair_count=repairs.len(),
+        "B15.1 stale LOD seam metadata queued for coherent regeneration");
+}
+
 /// B8 render-topology audit over PUBLISHED and GPU-ready blocks only.
 /// A mixed visible pair must be 2:1 and have a seam owned by the
 /// positive-coordinate block, or it can expose an actual raster crack.
@@ -533,6 +624,10 @@ fn stream_b3(
         }
     }
 
+    if state.mixed_lod && state.frame % 6 == 0 && state.edit_priority.is_empty() {
+        reconcile_lod_seams(&mut state, &mut commands, &mut meshes, &ready);
+    }
+
     if !state.transition_target.is_empty() {
         // B15.1: local edits do not wait for a 200+ block connected LOD
         // refinement cohort. Their replacements retain current LOD/seams;
@@ -546,6 +641,13 @@ fn stream_b3(
             connected_ready_components(&state.transition_target, &state.transition_pending)
         };
         for cohort in cohorts {
+            if critical.is_empty() && !cohort_seams_valid(
+                &cohort, &state.blocks, &state.transition_pending
+            ) {
+                // Neighbors may have streamed in since the transaction was
+                // prepared. Hold the old valid geometry and reconcile next.
+                continue;
+            }
             for coord in cohort {
                 let Some(mut replacement) = state.transition_pending.remove(&coord) else {
                     continue;
@@ -658,7 +760,8 @@ fn stream_b3(
     missing_edited.sort_by_key(|c| (c.x, c.y, c.z));
     for coord in missing_edited {
         if new_count >= limit || state.blocks.len() >= MAX_RESIDENT_BLOCKS { break; }
-        let spec = LodSpec { lod: STREAM_LOD, seam: SeamInfo::default(),
+        let spec = LodSpec { lod: STREAM_LOD,
+            seam: initial_stream_seam(coord, &state.blocks),
             revision: editor.world.revision(coord) };
         if let Some(block) = create_block(
             &mut commands, &mut meshes, &material, coord, spec, &editor.world, true
@@ -699,7 +802,7 @@ fn stream_b3(
         if state.blocks.contains_key(&coord) { continue; }
         let spec = LodSpec {
             lod: STREAM_LOD,
-            seam: SeamInfo::default(),
+            seam: initial_stream_seam(coord, &state.blocks),
             revision: editor.world.revision(coord),
         };
         if let Some(created) = create_block(
@@ -736,6 +839,12 @@ fn stream_b3(
             }
         }
     }
+    // Newly streamed neighbors can invalidate previously packed seam masks.
+    // Reconcile promptly; their repairs join the next atomic LOD cohort.
+    if new_count > 0 && state.edit_priority.is_empty() {
+        reconcile_lod_seams(&mut state, &mut commands, &mut meshes, &ready);
+    }
+
     // Every render-update frame: a one-frame seam violation must not be
     // hidden by the one-Hz progress telemetry.
     let (visible_mixed_pairs,tier_errors,seam_ownership_errors)=
