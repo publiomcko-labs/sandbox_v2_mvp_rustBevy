@@ -126,8 +126,10 @@ foreach ($arm in $arms) {
         $failures += "$name far shell unexpectedly inactive"
     }
 }
+$matrixStatus = 'B15_2_WINDOWS_VULKAN_MATRIX_PASS_VISUAL_PENDING'
+if ($failures.Count -gt 0) { $matrixStatus = 'B15_2_WINDOWS_VULKAN_MATRIX_HOLD' }
 $summary = [ordered]@{
-    status = if ($failures.Count -eq 0) { 'B15_2_WINDOWS_VULKAN_MATRIX_PASS_VISUAL_PENDING' } else { 'B15_2_WINDOWS_VULKAN_MATRIX_HOLD' }
+    status = $matrixStatus
     arms = @($results)
     failures = @($failures)
     caveats = @(
