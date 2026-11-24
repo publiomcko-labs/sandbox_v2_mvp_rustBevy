@@ -92,11 +92,16 @@ fn main() {
     if ["B5", "B6", "B7", "B8", "B11"].iter().any(|s| stage.eq_ignore_ascii_case(s)) {
         app.add_plugins(physics::MvpPhysicsPlugin);
     }
-    if stage.eq_ignore_ascii_case("B11")
-        || std::env::var("SANDBOX_B11_FAR_FIELD").as_deref() == Ok("1")
-    {
+    let far_field_requested = stage.eq_ignore_ascii_case("B11")
+        || std::env::var("SANDBOX_B11_FAR_FIELD").as_deref() == Ok("1");
+    // B15.2 independent visual-shell A/B: all SDF, LOD, physics and
+    // per-frame B14 telemetry remain identical in both arms.
+    let far_field_enabled = far_field_requested
+        && std::env::var("SANDBOX_B15_2_FAR_FIELD").as_deref() != Ok("0");
+    if far_field_enabled {
         app.add_plugins(visual_far::B11FarVisualCoveragePlugin);
     }
+    info!(far_field_enabled, "B15.2 distant visual coverage A/B mode");
     visual_capture::configure(&mut app);
     visual_raster::configure(&mut app);
     app.add_systems(Update, player::fly_camera).run();
