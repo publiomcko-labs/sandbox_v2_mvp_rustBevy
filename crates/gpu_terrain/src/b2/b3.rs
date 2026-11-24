@@ -202,6 +202,8 @@ struct StreamWorld {
     mixed_lod: bool,
     last_lod_epoch: u64,
     transition_target: HashMap<BlockCoord, LodSpec>,
+    // Edited chunks commit independently of unrelated LOD refinement cohorts.
+    edit_priority: HashSet<BlockCoord>,
     transition_pending: HashMap<BlockCoord, PendingUpgrade>,
     transition_commits: u64,
     atomic_publication_errors: u64,
@@ -296,6 +298,7 @@ fn create_block(
     coord: BlockCoord,
     spec: LodSpec,
     world: &WorldEdits,
+    priority: bool,
 ) -> Option<ActiveBlock> {
     let grid = DensityGrid::new(coord, spec.lod).ok()?;
     let (vertex_count, index_count) = b3_mixed_counts(grid, spec.seam.negative_face_mask);
@@ -317,6 +320,7 @@ fn create_block(
                 seam_mask: spec.seam.negative_face_mask,
                 neighbor_lod_words: spec.seam.neighbor_words,
                 brushes: world.brushes_for_grid(grid),
+                priority,
             },
             Mesh3d(handle.clone()),
             MeshMaterial3d(material.clone()),
@@ -459,10 +463,14 @@ fn stream_b3(
     // The readiness set is produced by the render graph after GPU dispatch.
     // Existing LOD2 meshes stay drawn until the new geometry is ready.
     if let Ok(mut dispatched) = ready.0.lock() {
-        for block in state.blocks.values_mut() {
+        for (&coord, block) in state.blocks.iter_mut() {
             if !block.visible && dispatched.remove(&block.mesh.id()) {
                 commands.entity(block.entity).insert(Visibility::Visible);
                 block.visible = true;
+                if let Some(start) = editor.pending_latency.remove(&coord) {
+                    info!(?coord, latency_ms=start.elapsed().as_secs_f64()*1000.0,
+                        "B15.1 new edited GPU chunk ready for publication");
+                }
             }
         }
         for replacement in state.transition_pending.values_mut() {
@@ -483,6 +491,7 @@ fn stream_b3(
         }))
     }).collect();
     for (coord, spec) in dirty {
+        state.edit_priority.insert(coord);
         if state.transition_target.get(&coord) != Some(&spec) {
             state.transition_target.insert(coord, spec);
             if let Some(obsolete) = state.transition_pending.remove(&coord) {
@@ -494,14 +503,24 @@ fn stream_b3(
     }
 
     if !state.transition_target.is_empty() {
-        let cohorts =
-            connected_ready_components(&state.transition_target, &state.transition_pending);
+        // B15.1: local edits do not wait for a 200+ block connected LOD
+        // refinement cohort. Their replacements retain current LOD/seams;
+        // delay unrelated LOD commits until this small edit cohort finishes.
+        let critical: HashMap<_,_> = state.edit_priority.iter()
+            .filter_map(|coord| state.transition_target.get(coord).map(|spec| (*coord, *spec)))
+            .collect();
+        let cohorts = if !critical.is_empty() {
+            connected_ready_components(&critical, &state.transition_pending)
+        } else {
+            connected_ready_components(&state.transition_target, &state.transition_pending)
+        };
         for cohort in cohorts {
             for coord in cohort {
                 let Some(mut replacement) = state.transition_pending.remove(&coord) else {
                     continue;
                 };
                 state.transition_target.remove(&coord);
+                state.edit_priority.remove(&coord);
                 if let Some(old) = state.blocks.remove(&coord) {
                     if !old.visible {
                         state.atomic_publication_errors+=1;
@@ -546,6 +565,7 @@ fn stream_b3(
                     meshes.remove(obsolete.block.mesh.id());
                 }
                 state.transition_target.remove(&key);
+                state.edit_priority.remove(&key);
             }
         }
     }
@@ -555,6 +575,7 @@ fn stream_b3(
     // Initial generation stays at welded uniform LOD2, avoiding seams
     // against unloaded/unfinished neighboring blocks.
     if state.mixed_lod
+        && state.edit_priority.is_empty()
         && state.transition_target.is_empty()
         && state.frame >= 180
         && state.frame.saturating_sub(state.last_lod_epoch) >= 60
@@ -598,23 +619,61 @@ fn stream_b3(
         OPTIMIZED_BLOCKS_PER_FRAME
     };
     let mut new_count = 0_usize;
+
+    // Fast lane 1: new blocks touched by an edit while the world is still
+    // streaming are generated before the rest of the 130m horizon.
+    let mut missing_edited: Vec<_> = editor.pending_latency.keys().copied()
+        .filter(|c| !state.blocks.contains_key(c)).collect();
+    missing_edited.sort_by_key(|c| (c.x, c.y, c.z));
+    for coord in missing_edited {
+        if new_count >= limit || state.blocks.len() >= MAX_RESIDENT_BLOCKS { break; }
+        let spec = LodSpec { lod: STREAM_LOD, seam: SeamInfo::default(),
+            revision: editor.world.revision(coord) };
+        if let Some(block) = create_block(
+            &mut commands, &mut meshes, &material, coord, spec, &editor.world, true
+        ) {
+            state.blocks.insert(coord, block);
+            new_count += 1;
+            state.dispatches += 1;
+        }
+    }
+
+    // Fast lane 2: existing edited chunks are rebuilt with the current
+    // visible LOD and seam specification. LOD-only work stays queued.
+    let mut edit_coords: Vec<_> = state.edit_priority.iter().copied().collect();
+    edit_coords.sort_by_key(|c| (c.x, c.y, c.z));
+    for coord in edit_coords {
+        if new_count >= limit { break; }
+        if state.transition_pending.contains_key(&coord) || !state.blocks.contains_key(&coord) {
+            continue;
+        }
+        let Some(&spec) = state.transition_target.get(&coord) else { continue; };
+        if let Some(block) = create_block(
+            &mut commands, &mut meshes, &material, coord, spec, &editor.world, true
+        ) {
+            state.transition_pending.insert(coord, PendingUpgrade { block, ready: false });
+            new_count += 1;
+            state.dispatches += 1;
+        }
+    }
+
+    // Regular streaming retains its original bounded throughput and 130m
+    // horizon. Never spend its allocation quota ahead of pending edits.
     let target_count = state.cached_plan.as_ref().expect("B3 plan").targets.len();
     for index in 0..target_count {
         if new_count >= limit || state.blocks.len() >= MAX_RESIDENT_BLOCKS {
             break;
         }
         let coord = state.cached_plan.as_ref().expect("B3 plan").targets[index].coord;
-        if state.blocks.contains_key(&coord) {
-            continue;
-        }
-        // New blocks enter as the known-good uniform LOD2 surface; the
-        // three-tier adaptive replacement happens transactionally later.
+        if state.blocks.contains_key(&coord) { continue; }
         let spec = LodSpec {
             lod: STREAM_LOD,
             seam: SeamInfo::default(),
             revision: editor.world.revision(coord),
         };
-        if let Some(created) = create_block(&mut commands, &mut meshes, &material, coord, spec, &editor.world) {
+        if let Some(created) = create_block(
+            &mut commands, &mut meshes, &material, coord, spec, &editor.world, false
+        ) {
             state.blocks.insert(coord, created);
             new_count += 1;
             state.dispatches += 1;
@@ -623,35 +682,29 @@ fn stream_b3(
         }
     }
 
-    // Generate up to the remainder of the same CPU/GPU frame budget as
-    // replacement chunks. Old geometry persists until every dependent
-    // chunk in a connected 3x3x3 cohort has completed GPU extraction.
-    if !state.transition_target.is_empty() && new_count < limit {
+    // Background LOD/refinement work is disabled while an edit cohort waits
+    // for GPU extraction; old visible meshes continue to be drawn.
+    if state.edit_priority.is_empty() && !state.transition_target.is_empty()
+        && new_count < limit {
         let mut coords: Vec<_> = state.transition_target.keys().copied().collect();
         coords.sort_by_key(|c| (c.x, c.y, c.z));
         for coord in coords {
-            if new_count >= limit {
-                break;
-            }
+            if new_count >= limit { break; }
             if state.transition_pending.contains_key(&coord) || !state.blocks.contains_key(&coord) {
                 continue;
             }
             let spec = state.transition_target[&coord];
-            if let Some(created) = create_block(&mut commands, &mut meshes, &material, coord, spec, &editor.world)
-            {
-                state.transition_pending.insert(
-                    coord,
-                    PendingUpgrade {
-                        block: created,
-                        ready: false,
-                    },
-                );
+            if let Some(created) = create_block(
+                &mut commands, &mut meshes, &material, coord, spec, &editor.world, false
+            ) {
+                state.transition_pending.insert(coord, PendingUpgrade {
+                    block: created, ready: false,
+                });
                 new_count += 1;
                 state.dispatches += 1;
             }
         }
     }
-
     // Every render-update frame: a one-frame seam violation must not be
     // hidden by the one-Hz progress telemetry.
     let (visible_mixed_pairs,tier_errors,seam_ownership_errors)=
