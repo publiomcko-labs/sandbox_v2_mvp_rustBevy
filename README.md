@@ -1,6 +1,8 @@
 # Sandbox V2 — MVP B | Rust + Bevy + GPU Compute
 
-**Estado:** B0 e B1 aprovados (incluindo paridade Vulkan real). B2 em implementação na branch `feat/b2-surface-nets-gpu-resident-20261119`; B3–B7 não iniciadas.
+**Estado (25/11/2026):** MVP Rust/Bevy implementado e funcional com terreno SDF gerado por GPU Compute, streaming 130 m, LOD 0/1/2, edição persistente, física Avian de rochas e água básica. **B15.5** é a última referência aprovada visualmente pelo usuário; **B15.6** (culling) e **B16** (terreno distante assíncrono) passaram em E2E Vulkan, mas são experimentos opt-in aguardando validação visual interativa. **B15.7** isolou a influência do agendamento headless na medição de frametime. A meta estrita de **60 FPS/16,7 ms na apresentação física** ainda não está qualificada. O histórico B0–B7 abaixo descreve o roteiro original, não o estado atual.
+
+**Branches de referência:** `checkpoint/b15-5-visual-approved-20261125` (visual aprovado); `checkpoint/b15-6-conservative-culling-e2e-20261125` (culling experimental); `checkpoint/b15-7-headless-frame-pacing-20261125` (diagnóstico); `exp/b16-async-far-shell-20261125` (assíncrono E2E). Nenhum desses experimentos foi promovido automaticamente para `main`.
 
 ## Objetivo
 
@@ -34,6 +36,17 @@ O benchmark será medido no renderizador real, não apenas em tarefas de computa
 - [Especificação técnica do MVP B](docs/MVP_B_RUST_BEVY_GPU_COMPUTE.md)
 - [Contrato comum de requisitos e benchmarks](docs/CRITERIOS_COMUNS.md)
 - [Implementação e validação B0](docs/B0_IMPLEMENTATION.md)
+
+## Recursos experimentais recentes (Windows/Vulkan)
+
+| Flag de ambiente | Efeito | Estado |
+|---|---|---|
+| `SANDBOX_B15_5_FIXED_SLABS=1` | Slabs GPU fixos de 32 MiB; evita realocação coletiva de malhas | Aprovado visualmente |
+| `SANDBOX_B15_6_CONSERVATIVE_CULLING=1` | AABB conservador para culling do terreno GPU | E2E, visual local pendente |
+| `SANDBOX_B16_ASYNC_FAR_SHELL=1` | Reconstrói o B11 distante fora da thread principal | E2E, visual local pendente |
+| `SANDBOX_B3_BENCH_UNCAPPED=1` | Remove a espera de 16 ms **apenas em testes headless** | Diagnóstico; não alterar a versão interativa |
+
+Para executar o sandbox completo no runtime extraído, use `SANDBOX_STAGE=B11` e habilite explicitamente as opções desejadas. Preserve `assets/shaders` junto ao executável. Os documentos [B15.6](docs/B15_6_CONSERVATIVE_CULLING_E2E_RESULTS.md), [B15.7](docs/B15_7_HEADLESS_PACING_20261125.md) e [B16](docs/B16_ASYNC_FAR_SHELL_E2E_20261125.md) registram os resultados e as limitações.
 
 ## Sequência inicial
 
