@@ -1,0 +1,35 @@
+name: B15.3 DXGI-NVENC local capture validation on Windows
+on:
+  push:
+    branches:
+      - 'exp/b15-3-dxgi-capture-20261125'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: b15-3-dxgi-capture-windows
+  cancel-in-progress: true
+jobs:
+  capture-contract:
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse B15.3 Windows PowerShell 5.1 scripts
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b15-2-parse-powershell.ps1"
+      - name: Validate DXGI NVENC and GDI command-line contracts
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b15-2-local-60fps.ps1" -ContractTest
+      - name: Check commit whitespace
+        shell: cmd
+        run: git diff --check HEAD^ HEAD
+      - name: Archive scripts for interactive local tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: b15-3-local-dxgi-scripts
+          path: |
+            scripts/b15-2-local-60fps.ps1
+            scripts/b15-3-local-dxgi-matrix.ps1
+            scripts/b15-correlate-video.py
+          if-no-files-found: error
