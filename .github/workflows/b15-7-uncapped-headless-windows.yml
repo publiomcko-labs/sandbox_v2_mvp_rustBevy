@@ -1,0 +1,39 @@
+name: B15.7 headless scheduler pacing qualification
+on:
+  push:
+    branches:
+      - 'exp/b15-7-headless-frame-pacing-20261125'
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: b15-7-headless-frame-pacing
+  cancel-in-progress: true
+jobs:
+  uncapped-vulkan-e2e:
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reuse exact previously-qualified B15.6 Windows runtime (no rebuild)
+        uses: actions/download-artifact@v4
+        with:
+          name: b15-6-windows-runtime
+          run-id: 45629673662
+          github-token: ${{ github.token }}
+          path: b14-runtime
+      - name: Verify downloaded binary and compile PowerShell script
+        shell: cmd
+        run: |
+          if not exist "b14-runtime\sandbox-game.exe" exit /b 1
+          if not exist "b14-runtime\assets\shaders" exit /b 1
+          powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$e=$null;$t=$null;[void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Get-Location) 'scripts\b15-7-uncapped-headless-e2e.ps1'),[ref]$t,[ref]$e);if($e.Count -gt 0){$e|Out-String|Write-Host;exit 1}"
+      - name: Run one uncapped 1080p Vulkan E2E with six edits and fixed GPU slabs
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-7-uncapped-headless-e2e.ps1"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b15-7-uncapped-headless-e2e-evidence
+          path: b15-7-evidence/
+          if-no-files-found: warn
