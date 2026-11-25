@@ -1,0 +1,74 @@
+name: Publish B17 approved MVP artifacts
+on:
+  push:
+    branches: ['release/b17-mvp-20261125']
+    paths: ['.github/workflows/publish-b17-mvp.yml']
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: publish-b17-mvp
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TESTED_SHA: 14e8806acfa4f4413278266789db7b2b7dd1519f
+      FINAL_SHA: ef78b8ec00ced3eb1033242302492cc6090d9128
+      RUN_ID: '45688167846'
+      TAG: v0.1.0-mvp-b17
+    steps:
+      - name: Verify source and existing successful run
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GH_REPO/actions/runs/$RUN_ID" --jq '{status,conclusion,head_sha}' > run.json
+          jq -e --arg sha "$TESTED_SHA" '.status == "completed" and .conclusion == "success" and .head_sha == $sha' run.json
+          test "$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq '.object.sha')" = "$FINAL_SHA"
+          if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            echo 'Release already exists; refusing overwrite.'
+            exit 1
+          fi
+      - name: Download exact original ZIP artifacts and verify SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          fetch_artifact() {
+            local id="$1" name="$2" digest="$3"
+            gh api "repos/$GH_REPO/actions/artifacts/$id" > artifact.json
+            jq -e --arg sha "$TESTED_SHA" --arg digest "sha256:$digest" --arg name "$name" --argjson run "$RUN_ID" '.name == $name and .digest == $digest and .expired == false and .workflow_run.id == $run and .workflow_run.head_sha == $sha' artifact.json
+            curl --fail --silent --show-error --location --retry 3 \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/$GH_REPO/actions/artifacts/$id/zip" \
+              -o "$name.zip"
+            echo "$digest  $name.zip" | sha256sum --check -
+            unzip -tq "$name.zip"
+            echo "$digest  $name.zip" >> SHA256SUMS.txt
+          }
+          fetch_artifact 15059233222 b17-windows-runtime 6de7893553a5fcf757fc243ad13c15212b9ceee7fba681ec22e3a370334c6831
+          fetch_artifact 15058524747 b17-integrated-e2e-evidence f8770b46582a0a4533306227ee3c48d2a4eefecf4f23022e7c777cff94677629
+          unzip -Z1 b17-windows-runtime.zip | grep -Fx 'sandbox-game.exe'
+          unzip -Z1 b17-windows-runtime.zip | grep -Fx 'b17-play.ps1'
+      - name: Publish functional MVP prerelease with verified assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<'EOF'
+          Functional Rust/Bevy MVP B17, visually approved on 2026-11-25. Windows/Vulkan integrated E2E passed; three interactive benchmarks reported 59.8–59.9 average FPS. Strict physical-present 16.7 ms criterion remains unqualified; residual frametime spikes and other scope limitations are documented.
+
+          Extract the complete Windows runtime ZIP and run:
+          `powershell -NoProfile -ExecutionPolicy Bypass -File .\b17-play.ps1`
+
+          Original validated runtime and E2E artifacts are reused without recompilation. SHA256SUMS.txt records their original ZIP hashes.
+
+          - [Final report](https://github.com/publiomcko-labs/sandbox_v2_mvp_rustBevy/blob/ef78b8ec00ced3eb1033242302492cc6090d9128/docs/B17_FINAL_MVP_20261125.md)
+          - [Post-MVP roadmap](https://github.com/publiomcko-labs/sandbox_v2_mvp_rustBevy/blob/ef78b8ec00ced3eb1033242302492cc6090d9128/docs/POST_MVP_ROADMAP.md)
+          - [Successful E2E](https://github.com/publiomcko-labs/sandbox_v2_mvp_rustBevy/actions/runs/45688167846)
+          EOF
+          gh release create "$TAG" b17-windows-runtime.zip b17-integrated-e2e-evidence.zip SHA256SUMS.txt \
+            --repo "$GH_REPO" --target "$FINAL_SHA" --title "B17 — Final functional MVP" --notes-file release-notes.md --prerelease
+          gh release view "$TAG" --repo "$GH_REPO" --json tagName,isPrerelease,isDraft,url,assets
