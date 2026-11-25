@@ -46,44 +46,6 @@ function Get-B15_3EncodeArgs {
     return @('-c:v','libx264','-preset','ultrafast',
         '-crf',"$Quality",'-pix_fmt','yuv420p')
 }
-if ($ContractTest) {
-    $dx = @(Get-B15_3InputArgs -Backend Dxgi -Rate 60 -X 294 -Y 317 -Width 1920 -Height 1080 -OutputIdx 0)
-    $ge = @(Get-B15_3InputArgs -Backend Gdi -Rate 60 -X 294 -Y 317 -Width 1920 -Height 1080 -OutputIdx 0)
-    $ne = @(Get-B15_3EncodeArgs -Backend Dxgi -Encoder Nvenc -Quality 22)
-    $ce = @(Get-B15_3EncodeArgs -Backend Gdi -Encoder Cpu -Quality 20)
-    if ((($dx -join ' ') -notmatch 'ddagrab=output_idx=0:framerate=60:draw_mouse=0:video_size=1920x1080:offset_x=294:offset_y=317') -or
-        $dx -contains 'gdigrab' -or $dx -contains 'desktop' -or
-        $ge -notcontains 'gdigrab' -or $ge -notcontains 'desktop' -or
-        $ne -notcontains 'h264_nvenc' -or $ne -contains '-pix_fmt' -or
-        $ce -notcontains 'libx264') {
-        throw 'B15_3_CAPTURE_ARGS_CONTRACT_FAILED'
-    }
-    $rejected = $false
-    try {
-        [void]@(Get-B15_3EncodeArgs -Backend Dxgi -Encoder Cpu -Quality 20)
-    } catch { $rejected = $_.Exception.Message -like '*B15_3_DXGI_REQUIRES_NVENC*' }
-    if (-not $rejected) { throw 'B15_3_DXGI_CPU_GUARD_FAILED' }
-    Write-Host 'B15_3_CAPTURE_ARGS_CONTRACT_PASS dxgi_nvenc gdi_cpu no_hwdownload'
-    return
-}
-if ($CaptureBackend -eq 'Dxgi' -and $Encoder -ne 'Nvenc') {
-    throw 'B15_3_DXGI_REQUIRES_NVENC: use -CaptureBackend Gdi with -Encoder Cpu as fallback'
-}
-$exe = Join-Path $AppDir 'sandbox-game.exe'
-if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Missing $exe" }
-if (-not (Test-Path -LiteralPath (Join-Path $AppDir 'assets\shaders'))) {
-    throw 'Missing shader assets in runtime folder'
-}
-$ffmpeg = Get-Command ffmpeg.exe -ErrorAction Stop
-$ffprobe = Get-Command ffprobe.exe -ErrorAction Stop
-$ffmpegVersion = @(& $ffmpeg.Source -version | Select-Object -First 1)[0]
-if ($CaptureBackend -eq 'Dxgi') {
-    $filterList = @(& $ffmpeg.Source -hide_banner -filters)
-    if ($LASTEXITCODE -ne 0 -or
-        -not @($filterList | Where-Object { $_ -like '*ddagrab*' }).Count) {
-        throw "B15_3_DXGI_FILTER_MISSING: $($ffmpeg.Source) has no ddagrab. Use FFmpeg 7.1.1 full_build."
-    }
-}
 if (-not ([System.Management.Automation.PSTypeName]'B15_2DesktopRect').Type) {
     Add-Type -TypeDefinition @'
 using System;
@@ -109,6 +71,52 @@ public static class B15_2DesktopRect {
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 }
 '@
+}
+if ($ContractTest) {
+    $dx = @(Get-B15_3InputArgs -Backend Dxgi -Rate 60 -X 294 -Y 317 -Width 1920 -Height 1080 -OutputIdx 0)
+    $ge = @(Get-B15_3InputArgs -Backend Gdi -Rate 60 -X 294 -Y 317 -Width 1920 -Height 1080 -OutputIdx 0)
+    $ne = @(Get-B15_3EncodeArgs -Backend Dxgi -Encoder Nvenc -Quality 22)
+    $ce = @(Get-B15_3EncodeArgs -Backend Gdi -Encoder Cpu -Quality 20)
+    if ((($dx -join ' ') -notmatch 'ddagrab=output_idx=0:framerate=60:draw_mouse=0:video_size=1920x1080:offset_x=294:offset_y=317') -or
+        $dx -contains 'gdigrab' -or $dx -contains 'desktop' -or
+        $ge -notcontains 'gdigrab' -or $ge -notcontains 'desktop' -or
+        $ne -notcontains 'h264_nvenc' -or $ne -contains '-pix_fmt' -or
+        $ce -notcontains 'libx264') {
+        throw 'B15_3_CAPTURE_ARGS_CONTRACT_FAILED'
+    }
+    $rejected = $false
+    try {
+        [void]@(Get-B15_3EncodeArgs -Backend Dxgi -Encoder Cpu -Quality 20)
+    } catch { $rejected = $_.Exception.Message -like '*B15_3_DXGI_REQUIRES_NVENC*' }
+    if (-not $rejected) { throw 'B15_3_DXGI_CPU_GUARD_FAILED' }
+    # Exercise actual P/Invoke struct marshalling: PowerShell 5.1 selects the
+    # wrong Marshal.SizeOf overload when handed a RuntimeType.
+    $monitorProbe = New-Object B15_2_MONITORINFO
+    $monitorProbe.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($monitorProbe)
+    if ($monitorProbe.cbSize -ne 40) {
+        throw "B15_3_MONITORINFO_ABI_FAILED size=$($monitorProbe.cbSize) expected=40"
+    }
+    Write-Host "B15_3_MONITORINFO_MARSHAL_PASS size=$($monitorProbe.cbSize)"
+    Write-Host 'B15_3_CAPTURE_ARGS_CONTRACT_PASS dxgi_nvenc gdi_cpu no_hwdownload'
+    return
+}
+if ($CaptureBackend -eq 'Dxgi' -and $Encoder -ne 'Nvenc') {
+    throw 'B15_3_DXGI_REQUIRES_NVENC: use -CaptureBackend Gdi with -Encoder Cpu as fallback'
+}
+$exe = Join-Path $AppDir 'sandbox-game.exe'
+if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Missing $exe" }
+if (-not (Test-Path -LiteralPath (Join-Path $AppDir 'assets\shaders'))) {
+    throw 'Missing shader assets in runtime folder'
+}
+$ffmpeg = Get-Command ffmpeg.exe -ErrorAction Stop
+$ffprobe = Get-Command ffprobe.exe -ErrorAction Stop
+$ffmpegVersion = @(& $ffmpeg.Source -version | Select-Object -First 1)[0]
+if ($CaptureBackend -eq 'Dxgi') {
+    $filterList = @(& $ffmpeg.Source -hide_banner -filters)
+    if ($LASTEXITCODE -ne 0 -or
+        -not @($filterList | Where-Object { $_ -like '*ddagrab*' }).Count) {
+        throw "B15_3_DXGI_FILTER_MISSING: $($ffmpeg.Source) has no ddagrab. Use FFmpeg 7.1.1 full_build."
+    }
 }
 try { [void][B15_2DesktopRect]::SetProcessDPIAware() } catch {}
 $stamp = [DateTimeOffset]::UtcNow.ToString('yyyyMMdd-HHmmss')
