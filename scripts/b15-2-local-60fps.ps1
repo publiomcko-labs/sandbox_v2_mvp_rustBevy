@@ -17,6 +17,15 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+function Get-B15_4PresentMonFailure {
+    param([string]$ErrorText,[int]$ExitCode)
+    if ($ErrorText -match '(?i)access denied|requires (either )?administrative privileges|Performance Log Users') {
+        return 'B15_4_PRESENTMON_ACCESS_DENIED: ETW collector requires an elevated PowerShell session (Run as administrator), or membership in Performance Log Users with a fresh logon. No full recording started.'
+    }
+    $tail = ($ErrorText -split "[\r\n]+" | Where-Object { $_.Trim() } |
+        Select-Object -Last 5) -join ' | '
+    return "B15_4_PRESENTMON_START_FAILED exit=$ExitCode details=$tail"
+}
 function Get-B15_3InputArgs {
     param(
         [string]$Backend, [int]$Rate, [int]$X, [int]$Y,
@@ -90,6 +99,15 @@ if ($ContractTest) {
         [void]@(Get-B15_3EncodeArgs -Backend Dxgi -Encoder Cpu -Quality 20)
     } catch { $rejected = $_.Exception.Message -like '*B15_3_DXGI_REQUIRES_NVENC*' }
     if (-not $rejected) { throw 'B15_3_DXGI_CPU_GUARD_FAILED' }
+    $pmAccess = Get-B15_4PresentMonFailure -ErrorText 'error: failed to start trace session: access denied.' -ExitCode 1
+    if ($pmAccess -notlike 'B15_4_PRESENTMON_ACCESS_DENIED:*') {
+        throw 'B15_4_PRESENTMON_ACCESS_DENIED_CONTRACT_FAILED'
+    }
+    $pmOther = Get-B15_4PresentMonFailure -ErrorText 'unknown option --x' -ExitCode 2
+    if ($pmOther -notlike 'B15_4_PRESENTMON_START_FAILED*') {
+        throw 'B15_4_PRESENTMON_OTHER_FAILURE_CONTRACT_FAILED'
+    }
+    Write-Host 'B15_4_PRESENTMON_ACCESS_PREFLIGHT_CONTRACT_PASS'
     # Exercise actual P/Invoke struct marshalling: PowerShell 5.1 selects the
     # wrong Marshal.SizeOf overload when handed a RuntimeType.
     $monitorProbe = New-Object B15_2_MONITORINFO
@@ -271,6 +289,20 @@ try {
             -RedirectStandardError (Join-Path $session 'presentmon.stderr.log')
         $presentMonStarted = $true
         Write-Host "B15_4_PRESENTMON_STARTED pid=$($presentMon.Id) game_pid=$($game.Id)"
+        # Protect long 120s A/B runs: the current machine's PresentMon
+        # previously exited with "access denied" and no CSV. Fail before
+        # the 8s video preflight (and before Auto's full benchmark).
+        Start-Sleep -Seconds 3
+        $presentMon.Refresh()
+        if ($presentMon.HasExited) {
+            $pmErrorPath = Join-Path $session 'presentmon.stderr.log'
+            $pmError = if (Test-Path -LiteralPath $pmErrorPath) {
+                [System.IO.File]::ReadAllText($pmErrorPath)
+            } else { '' }
+            $pmMessage = Get-B15_4PresentMonFailure -ErrorText $pmError -ExitCode $presentMon.ExitCode
+            throw "$pmMessage Log=$pmErrorPath"
+        }
+        Write-Host 'B15_4_PRESENTMON_STARTUP_PASS collector_alive_after_3s'
     }
     if ($Mode -eq 'Auto') {
         # The survey route holds the camera still for its first 12 game seconds.
