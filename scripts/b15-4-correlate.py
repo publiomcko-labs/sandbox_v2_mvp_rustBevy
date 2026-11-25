@@ -209,7 +209,7 @@ def selftest() -> None:
     assert len(found) == 1 and found[0]["canceled"] == 8
     naive = "CPUStartDateTime,MsBetweenAppPresents,MsGPUTime\n2026-11-25 07:38:09.0000000,16.7,8.0\n"
     pres, status = presentmon_rows(naive, -180)
-    assert status == "timestamped" and pres[0]["unix_ms"] == 1795599489000
+    assert status == "timestamped" and pres[0]["unix_ms"] == 1795603089000
     print("B15_4_CORRELATOR_SELFTEST_PASS")
 
 
