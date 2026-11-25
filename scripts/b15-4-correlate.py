@@ -98,7 +98,8 @@ def presentmon_rows(text: str, offset_minutes: int | None) -> tuple[list[dict], 
         except ValueError:
             continue
         sample = {"unix_ms": ms}
-        for field in ("MsBetweenAppPresents", "DisplayedTime", "MsGPUTime",
+        for field in ("MsBetweenPresents", "MsBetweenAppPresents", "MsBetweenDisplayChange",
+                      "MsBetweenAppStart", "DisplayedTime", "MsGPUTime",
                       "MsGPUBusy", "MsCPUBusy", "DisplayLatency"):
             try:
                 sample[field] = float(row[field])
@@ -157,8 +158,13 @@ def metrics_for(archive_path: str) -> dict:
     present, present_status = presentmon_rows(
         present_text, meta.get("local_utc_offset_minutes")) if present_text else ([], "not_recorded")
     in_present = [p for p in present if record_start <= p["unix_ms"] <= record_end]
-    present_gaps = [p["MsBetweenAppPresents"] for p in in_present
-                    if "MsBetweenAppPresents" in p and p["MsBetweenAppPresents"] >= 0]
+    # The official PresentMon v2 default CSV calls the API-to-API gap
+    # MsBetweenPresents; not the older/unsupported MsBetweenAppPresents.
+    present_gaps = [v for p in in_present
+                    if (v := p.get("MsBetweenPresents",
+                                  p.get("MsBetweenAppPresents"))) is not None and v >= 0]
+    display_gaps = [p["MsBetweenDisplayChange"] for p in in_present
+                    if "MsBetweenDisplayChange" in p and p["MsBetweenDisplayChange"] >= 0]
     gpu_times = [p["MsGPUTime"] for p in in_present if "MsGPUTime" in p]
     focus = []
     for edit in [e for e in events if e["type"] == "edit"]:
@@ -194,6 +200,7 @@ def metrics_for(archive_path: str) -> dict:
         "presentmon_status": present_status,
         "presentmon_frames_in_video": len(in_present),
         "presentmon_app_present_p95_ms": percentile(present_gaps, .95),
+        "presentmon_display_change_p95_ms": percentile(display_gaps, .95),
         "presentmon_gpu_time_p95_ms": percentile(gpu_times, .95),
         "focus_edits": focus,
         "timing_caveat": ("B14 wall-clock gaps and PresentMon API timestamps are distinct "
@@ -207,9 +214,11 @@ def selftest() -> None:
     colored = "\x1b[2m2026-11-25T10:38:09.000000Z\x1b[0m B15.2 edit and seam cohort queued atomically \x1b[3mcanceled\x1b[0m=\x1b[0m8"
     found = log_events(colored)
     assert len(found) == 1 and found[0]["canceled"] == 8
-    naive = "CPUStartDateTime,MsBetweenAppPresents,MsGPUTime\n2026-11-25 07:38:09.0000000,16.7,8.0\n"
+    naive = "CPUStartDateTime,MsBetweenPresents,MsGPUTime,MsBetweenDisplayChange\n2026-11-25 07:38:09.0000000,16.7,8.0,16.9\n"
     pres, status = presentmon_rows(naive, -180)
     assert status == "timestamped" and pres[0]["unix_ms"] == 1795603089000
+    assert pres[0]["MsBetweenPresents"] == 16.7
+    assert pres[0]["MsBetweenDisplayChange"] == 16.9
     print("B15_4_CORRELATOR_SELFTEST_PASS")
 
 
@@ -228,7 +237,9 @@ def main() -> None:
     arms = [metrics_for(p) for p in (opts.shell_on, opts.shell_off)]
     result = {
         "status": "CORRELATED_WITH_PRESENT_MON" if all(
-            arm["presentmon_frames_in_video"] > 50 for arm in arms
+            arm["presentmon_frames_in_video"] > 50 and
+            arm["presentmon_app_present_p95_ms"] is not None
+            for arm in arms
         ) else "CORRELATED_B14_ONLY_PRESENT_UNMEASURED",
         "arms": arms,
         "qualifications": [
