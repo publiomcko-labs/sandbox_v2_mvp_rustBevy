@@ -1,0 +1,26 @@
+name: B15.4 Windows DXGI window containment regression
+on:
+  push:
+    branches:
+      - 'test/b15-4-window-containment-20261125'
+permissions:
+  contents: read
+jobs:
+  windows-check:
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse DXGI and PresentMon local scripts with PowerShell 5.1
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-2-parse-powershell.ps1"
+      - name: Validate window containment and ETW access denied contract
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-2-local-60fps.ps1" -ContractTest
+      - name: Deliver local DXGI fix
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b15-4-window-containment-fix
+          path: scripts/b15-2-local-60fps.ps1
+          if-no-files-found: error
