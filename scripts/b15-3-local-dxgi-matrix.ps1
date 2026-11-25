@@ -6,10 +6,34 @@ param(
     [string]$OutputRoot = 'C:\Dev\sandbox-b15-2-local\captures',
     [ValidateRange(15,300)][int]$DurationSeconds = 120,
     [ValidateRange(24,60)][int]$Fps = 60,
-    [ValidateRange(0,16)][int]$DxgiOutputIdx = 0
+    [ValidateRange(0,16)][int]$DxgiOutputIdx = 0,
+    [switch]$ContractTest
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+function ConvertTo-B15_3PlainLog {
+    param([string]$Text)
+    # Rust tracing inserts ANSI SGR markers around both keys and equal signs.
+    # Regex key=value cannot match until they are stripped.
+    return ($Text -replace '\x1b\[[0-9;]*m', '')
+}
+if ($ContractTest) {
+    $esc = [char]27
+    $fixture = "B4 revised GPU mesh ready for publication latency_ms${esc}[0m=${esc}[0m42.5264" +
+        "`nB3 horizon coverage lod_bad_frames${esc}[0m=${esc}[0m0 b15_2_cancelled_lod_jobs${esc}[0m=${esc}[0m24 b15_2_post_edit_repair_blocks${esc}[0m=${esc}[0m20"
+    $plain = ConvertTo-B15_3PlainLog -Text $fixture
+    $lat = [regex]::Matches($plain,
+        'B4 revised GPU mesh ready for publication[^\r\n]*latency_ms=([0-9.]+)')
+    $repair = [regex]::Match($plain,'b15_2_post_edit_repair_blocks=(\d+)')
+    $canceled = [regex]::Match($plain,'b15_2_cancelled_lod_jobs=(\d+)')
+    if ($lat.Count -ne 1 -or $lat[0].Groups[1].Value -ne '42.5264' -or
+        -not $repair.Success -or $repair.Groups[1].Value -ne '20' -or
+        -not $canceled.Success -or $canceled.Groups[1].Value -ne '24') {
+        throw 'B15_3_ANSI_LOG_PARSER_CONTRACT_FAILED'
+    }
+    Write-Host 'B15_3_ANSI_LOG_PARSER_CONTRACT_PASS latency=42.5264 post_edit_repairs=20 cancelled=24'
+    return
+}
 $runner = Join-Path $PSScriptRoot 'b15-2-local-60fps.ps1'
 if (-not (Test-Path -LiteralPath $runner)) { throw "Missing $runner" }
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
@@ -55,7 +79,7 @@ foreach ($arm in $arms) {
         "$($meta.atomic_edits)" -ne '1') {
         throw "B15_3_METADATA_MISMATCH arm=$name session=$session"
     }
-    $log = Get-Content -LiteralPath $gameLog -Raw
+    $log = ConvertTo-B15_3PlainLog -Text (Get-Content -LiteralPath $gameLog -Raw)
     $rows = @(Import-Csv -LiteralPath $framesPath)
     $missingAfter20 = @($rows | Where-Object {
         [double]::Parse($_.game_t_s,$inv) -ge 20.0 -and [int]$_.missing -gt 0
@@ -86,15 +110,29 @@ foreach ($arm in $arms) {
     }
     $lodBad = 0
     $postEditSeamRepairBlocks = 0
+    $cancelledLodJobs = 0
+    $staleSeamEvents = [regex]::Matches($log,'B15\.1 stale LOD seam metadata queued').Count
+    $relocations = 0
+    foreach ($m in [regex]::Matches($log,
+        'B15\.1 GPU relocated live meshes prioritized[^\r\n]*relocations=(\d+)')) {
+        $relocations += [int]$m.Groups[1].Value
+    }
     $lastHorizon = @($log -split '[\r\n]+' |
         Where-Object { $_ -match 'B3 horizon coverage' } | Select-Object -Last 1)
     if ($lastHorizon.Count -gt 0) {
         if ($lastHorizon[0] -match 'lod_bad_frames=(\d+)') { $lodBad = [int]$Matches[1] }
+        if ($lastHorizon[0] -match 'b15_2_cancelled_lod_jobs=(\d+)') {
+            $cancelledLodJobs = [int]$Matches[1]
+        }
         if ($lastHorizon[0] -match 'b15_2_post_edit_repair_blocks=(\d+)') {
             $postEditSeamRepairBlocks = [int]$Matches[1]
         }
     }
     $reason = @()
+    if ($lastHorizon.Count -eq 0) { $reason += 'missing_final_horizon_audit' }
+    if ($latencyMatches.Count -eq 0 -and $edits -gt 0) {
+        $reason += 'missing_edited_mesh_publications'
+    }
     if (-not $meta.video_fps_qualified) { $reason += 'capture_below_50fps' }
     if ($p95 -gt 16.7) { $reason += 'game_frame_interval_p95_above_16_7ms' }
     if ($lodBad -gt 0) { $reason += 'lod_bad_frames' }
@@ -123,6 +161,9 @@ foreach ($arm in $arms) {
         missing_logical_after_20s = $missingAfter20
         lod_bad_frames = $lodBad
         post_edit_seam_repair_blocks = $postEditSeamRepairBlocks
+        cancelled_lod_jobs = $cancelledLodJobs
+        stale_seam_reconciliation_events = $staleSeamEvents
+        gpu_relocations = $relocations
         far_shell_updates = $shellUpdates
         runtime_errors = $errorCount
         status = if ($reason.Count -eq 0) { 'TELEMETRY_PASS_PIXEL_PENDING' } else { 'HOLD' }
