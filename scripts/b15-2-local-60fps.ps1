@@ -26,6 +26,18 @@ function Get-B15_4PresentMonFailure {
         Select-Object -Last 5) -join ' | '
     return "B15_4_PRESENTMON_START_FAILED exit=$ExitCode details=$tail"
 }
+function Get-B15_4PresentMonPlan {
+    param([int]$GameProcessId,[string]$CsvPath,[int]$DurationSeconds,[string]$Mode)
+    # The collector begins before Auto's 12s warmup + 8s FFmpeg preflight,
+    # while FFprobe can require additional time after the video completes.
+    # In the observed 60s Auto run the game lasted ~100s. An explicit
+    # timed completion is reliable even if terminate_on_proc_exit misses
+    # a forced game shutdown; waiting only 8s previously lost both CSVs.
+    $overhead = if ($Mode -eq 'Auto') { 40 } else { 20 }
+    $timer = $DurationSeconds + $overhead
+    $args = '--process_id {0} --output_file "{1}" --date_time --timed {2} --terminate_after_timed --terminate_on_proc_exit --no_console_stats --session_name B154_{0}' -f $GameProcessId, $CsvPath, $timer
+    return @{ TimerSeconds=$timer; Arguments=$args }
+}
 function Get-B15_4DxgiWindowShift {
     param(
         [int]$X, [int]$Y, [int]$Width, [int]$Height,
@@ -131,6 +143,14 @@ if ($ContractTest) {
         throw 'B15_4_PRESENTMON_OTHER_FAILURE_CONTRACT_FAILED'
     }
     Write-Host 'B15_4_PRESENTMON_ACCESS_PREFLIGHT_CONTRACT_PASS'
+    $autoPlan = Get-B15_4PresentMonPlan -GameProcessId 12345 -CsvPath 'C:\Temp\presentmon.csv' -DurationSeconds 60 -Mode Auto
+    $livePlan = Get-B15_4PresentMonPlan -GameProcessId 12345 -CsvPath 'C:\Temp\presentmon.csv' -DurationSeconds 15 -Mode Live
+    if ($autoPlan.TimerSeconds -ne 100 -or $livePlan.TimerSeconds -ne 35 -or
+        $autoPlan.Arguments -notlike '*--terminate_after_timed*' -or
+        $autoPlan.Arguments -notlike '*--terminate_on_proc_exit*') {
+        throw 'B15_4_PRESENTMON_TIMED_FINALIZE_CONTRACT_FAILED'
+    }
+    Write-Host 'B15_4_PRESENTMON_TIMED_FINALIZE_CONTRACT_PASS 60s_auto_timer=100s 15s_live_timer=35s'
     $shift = Get-B15_4DxgiWindowShift -X 346 -Y 369 -Width 1920 -Height 1080 -MonitorLeft 0 -MonitorTop 0 -MonitorRight 3440 -MonitorBottom 1440
     if ($shift.dx -ne 0 -or $shift.dy -ne -25) {
         throw "B15_4_DXGI_REPOSITION_CONTRACT_FAILED got_dx=$($shift.dx) got_dy=$($shift.dy)"
@@ -210,6 +230,9 @@ $game = $null
 $presentMon = $null
 $presentMonCsv = Join-Path $session 'presentmon.csv'
 $presentMonStarted = $false
+$presentMonDeadline = $null
+$presentMonTimedOut = $false
+$presentMonUnqualified = $false
 try {
     $gameLaunch = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $game = Start-Process -FilePath $exe -WorkingDirectory $AppDir -PassThru `
@@ -355,13 +378,13 @@ try {
         if (-not (Test-Path -LiteralPath $PresentMonPath -PathType Leaf)) {
             throw "B15_4_PRESENTMON_NOT_FOUND: $PresentMonPath"
         }
-        $pmDuration = $DurationSeconds + 90
-        $pmArgs = '--process_id {0} --output_file "{1}" --date_time --timed {2} --terminate_on_proc_exit --no_console_stats --session_name B154_{0}' -f $game.Id, $presentMonCsv, $pmDuration
-        $presentMon = Start-Process -FilePath $PresentMonPath -ArgumentList $pmArgs -PassThru -WindowStyle Hidden `
+        $pmPlan = Get-B15_4PresentMonPlan -GameProcessId $game.Id -CsvPath $presentMonCsv -DurationSeconds $DurationSeconds -Mode $Mode
+        $presentMonDeadline = [DateTimeOffset]::UtcNow.AddSeconds($pmPlan.TimerSeconds)
+        $presentMon = Start-Process -FilePath $PresentMonPath -ArgumentList $pmPlan.Arguments -PassThru -WindowStyle Hidden `
             -RedirectStandardOutput (Join-Path $session 'presentmon.stdout.log') `
             -RedirectStandardError (Join-Path $session 'presentmon.stderr.log')
         $presentMonStarted = $true
-        Write-Host "B15_4_PRESENTMON_STARTED pid=$($presentMon.Id) game_pid=$($game.Id)"
+        Write-Host "B15_4_PRESENTMON_STARTED pid=$($presentMon.Id) game_pid=$($game.Id) timer_seconds=$($pmPlan.TimerSeconds) explicit_timed_termination=1"
         # Protect long 120s A/B runs: the current machine's PresentMon
         # previously exited with "access denied" and no CSV. Fail before
         # the 8s video preflight (and before Auto's full benchmark).
@@ -525,17 +548,37 @@ try {
         Start-Sleep -Milliseconds 500
     }
     if ($presentMon) {
+        # PresentMon starts with the game, not the FFmpeg recording. Never
+        # force-kill it after a fixed 8s timeout: the previous two 60s
+        # sessions had empty stderr yet lost their CSV entirely.
+        $remaining = [Math]::Max(0,($presentMonDeadline - [DateTimeOffset]::UtcNow).TotalSeconds)
+        $waitSec = [int][Math]::Max(15,[Math]::Min(75,[Math]::Ceiling($remaining) + 15))
+        Write-Host "B15_4_PRESENTMON_FINALIZE_WAIT seconds=$waitSec deadline_remaining_seconds=$([Math]::Round($remaining,1))"
         try {
-            if (-not $presentMon.WaitForExit(8000)) {
+            if (-not $presentMon.WaitForExit($waitSec * 1000)) {
+                $presentMonTimedOut = $true
                 Stop-Process -Id $presentMon.Id -Force -ErrorAction SilentlyContinue
             }
-        } catch { Write-Warning "B15_4_PRESENTMON_SHUTDOWN_WARNING: $($_.Exception.Message)" }
+        } catch {
+            $presentMonTimedOut = $true
+            Write-Warning "B15_4_PRESENTMON_SHUTDOWN_WARNING: $($_.Exception.Message)"
+        }
         $pmBytes = if (Test-Path -LiteralPath $presentMonCsv) {
             (Get-Item -LiteralPath $presentMonCsv).Length
         } else { 0 }
-        Write-Host "B15_4_PRESENTMON_CSV_BYTES=$pmBytes"
-        if ($pmBytes -lt 1000) {
-            Write-Warning "B15_4_PRESENTMON_UNQUALIFIED: missing or empty external present data; inspect presentmon logs"
+        Write-Host "B15_4_PRESENTMON_CSV_BYTES=$pmBytes timed_out=$presentMonTimedOut"
+        if ($pmBytes -lt 1000 -or $presentMonTimedOut) {
+            $presentMonUnqualified = $true
+            Write-Warning "B15_4_PRESENTMON_UNQUALIFIED: no finalized ETW data; preserve this session and stop before next arm"
+        } else {
+            $pmCsvHeader = Get-Content -LiteralPath $presentMonCsv -TotalCount 1
+            if ($pmCsvHeader -notmatch 'CPUStartDateTime' -or
+                $pmCsvHeader -notmatch 'MsBetweenPresents') {
+                $presentMonUnqualified = $true
+                Write-Warning 'B15_4_PRESENTMON_UNQUALIFIED: missing required frame timing columns'
+            } else {
+                Write-Host 'B15_4_PRESENTMON_FINALIZED_PASS csv_header_valid=1'
+            }
         }
     }
     if ($Mode -eq 'Auto') {
@@ -555,6 +598,9 @@ try {
     $archive = "$session.zip"
     Compress-Archive -Path (Join-Path $session '*') -DestinationPath $archive -Force
     Write-Host "B15_2_READY_FOR_REVIEW: $archive"
+    if ($presentMonUnqualified) {
+        throw "B15_4_PRESENTMON_FINALIZATION_FAILED: no complete CSV. Archive preserved: $archive. The paired matrix must not run its next arm."
+    }
 } finally {
     if ($presentMon) {
         try { if (-not $presentMon.HasExited) { Stop-Process -Id $presentMon.Id -Force -ErrorAction SilentlyContinue } } catch {}
