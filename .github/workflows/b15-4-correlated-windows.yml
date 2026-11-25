@@ -1,0 +1,93 @@
+name: B15.4 correlated Vulkan CPU LOD and DXGI capture
+on:
+  push:
+    branches:
+      - 'exp/b15-4-correlated-present-seams-20261125'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: b15-4-correlated-windows
+  cancel-in-progress: true
+jobs:
+  windows-vulkan-correlated:
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      CARGO_TARGET_DIR: ${{ github.workspace }}\\..\\_b6_cargo_target
+      SANDBOX_B15_4_CORRELATE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse PowerShell 5.1 capture and diagnostic scripts
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b15-2-parse-powershell.ps1"
+      - name: Validate DXGI and ANSI parser contracts
+        shell: cmd
+        run: |
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b15-2-local-60fps.ps1" -ContractTest
+          if errorlevel 1 exit /b 1
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b15-3-local-dxgi-matrix.ps1" -ContractTest
+          if errorlevel 1 exit /b 1
+      - name: Reuse Windows MSVC Rust environment
+        shell: cmd
+        env:
+          CARGO_HOME: ${{ runner.temp }}\\b0-cargo
+          RUSTUP_HOME: ${{ runner.temp }}\\b0-rustup
+        run: |
+          if not exist "%CARGO_HOME%\\bin\\rustup.exe" (
+            curl.exe --proto =https --tlsv1.2 --retry 3 -fL -o "%RUNNER_TEMP%\\rustup-init.exe" https://win.rustup.rs/x86_64
+            if errorlevel 1 exit /b 1
+            "%RUNNER_TEMP%\\rustup-init.exe" -y --no-modify-path --default-toolchain none
+            if errorlevel 1 exit /b 1
+          )
+          "%CARGO_HOME%\\bin\\rustup.exe" toolchain install 1.100.0 --profile minimal --no-self-update
+          if errorlevel 1 exit /b 1
+          echo %CARGO_HOME%\\bin>>"%GITHUB_PATH%"
+          echo CARGO_HOME=%CARGO_HOME%>>"%GITHUB_ENV%"
+          echo RUSTUP_HOME=%RUSTUP_HOME%>>"%GITHUB_ENV%"
+      - name: Validate world and streaming contracts
+        shell: cmd
+        run: cargo +1.100.0 test --locked -p sandbox-streaming -p sandbox-world-core
+      - name: Build instrumented B15.4 Rust release
+        shell: cmd
+        run: cargo +1.100.0 build --release --locked -p sandbox-game
+      - name: Package new instrumented Windows executable
+        shell: cmd
+        run: |
+          if not exist "b15-4-runtime\\assets" mkdir "b15-4-runtime\\assets"
+          copy /Y "%CARGO_TARGET_DIR%\\release\\sandbox-game.exe" "b15-4-runtime\\sandbox-game.exe"
+          if errorlevel 1 exit /b 1
+          xcopy /E /I /Y "assets\\shaders" "b15-4-runtime\\assets\\shaders"
+          if errorlevel 1 exit /b 1
+      - name: Re-run identical-cost baseline, atomic B11-on and atomic B11-off Vulkan arms
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b15-2-windows-matrix.ps1"
+      - name: Check synchronized B15.4 CPU/LOD evidence for all arms
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b15-4-ci-check.ps1"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b15-4-windows-correlated-evidence
+          path: |
+            b15-2-evidence/
+            b14-evidence/
+          if-no-files-found: warn
+      - if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b15-4-windows-runtime
+          path: b15-4-runtime/
+          if-no-files-found: error
+      - if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b15-4-local-capture-tools
+          path: |
+            scripts/b15-2-local-60fps.ps1
+            scripts/b15-3-local-dxgi-matrix.ps1
+            scripts/b15-4-correlate.py
+          if-no-files-found: error
