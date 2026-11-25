@@ -1,8 +1,25 @@
 # Sandbox V2 — MVP B | Rust + Bevy + GPU Compute
 
-**Estado (25/11/2026):** MVP Rust/Bevy implementado e funcional com terreno SDF gerado por GPU Compute, streaming 130 m, LOD 0/1/2, edição persistente, física Avian de rochas e água básica. **B15.5** é a última referência aprovada visualmente pelo usuário; **B15.6** (culling) e **B16** (terreno distante assíncrono) passaram em E2E Vulkan, mas são experimentos opt-in aguardando validação visual interativa. **B15.7** isolou a influência do agendamento headless na medição de frametime. A meta estrita de **60 FPS/16,7 ms na apresentação física** ainda não está qualificada. O histórico B0–B7 abaixo descreve o roteiro original, não o estado atual.
+**Estado final (25/11/2026): B17 funcionalmente aprovada, com ressalvas de desempenho e escopo.** E2E Windows/Vulkan aprovado, revisão visual interativa aprovada pelo usuário e três benchmarks locais com 59,8–59,9 FPS médios. A homologação estrita de 60 FPS/16,7 ms na apresentação física não foi concluída. O contrato original permanece inalterado.
 
-**Branches de referência:** `checkpoint/b15-5-visual-approved-20261125` (visual aprovado); `checkpoint/b15-6-conservative-culling-e2e-20261125` (culling experimental); `checkpoint/b15-7-headless-frame-pacing-20261125` (diagnóstico); `exp/b16-async-far-shell-20261125` (assíncrono E2E). Nenhum desses experimentos foi promovido automaticamente para `main`.
+**Referência final:** `checkpoint/b17-final-mvp-20261125`. Fonte do runtime aprovado: `14e8806acfa4f4413278266789db7b2b7dd1519f`. Preservado o checkpoint visual anterior B15.5. B17 integra slabs fixos, culling conservador e terreno distante assíncrono, habilitados pelo launcher; não foram alterados os defaults do motor.
+
+## Executar a versão final (Windows/Vulkan)
+
+Baixe o artefato completo [b17-windows-runtime](https://github.com/publiomcko-labs/sandbox_v2_mvp_rustBevy/actions/runs/45688167846/artifacts/15059233222) ou utilize GitHub CLI:
+
+```powershell
+$root="C:\Dev\sandbox-b17-final"
+New-Item -ItemType Directory -Force -Path "$root\app" | Out-Null
+gh run download 45688167846 --repo publiomcko-labs/sandbox_v2_mvp_rustBevy --name b17-windows-runtime --dir "$root\app"
+powershell -NoProfile -ExecutionPolicy Bypass -File "$root\app\b17-play.ps1"
+```
+
+Extraia/preserve `assets/shaders` e utilize o launcher incluído, que ativa as flags aprovadas e utiliza os journals locais de terreno e rochas. O binário isolado não equivale à configuração aprovada. O artefato Actions tem retenção limitada.
+
+- [Relatório final B17: E2E, benchmark interativo e limitações](docs/B17_FINAL_MVP_20261125.md)
+- [Backlog pós-MVP](docs/POST_MVP_ROADMAP.md)
+- [Execução E2E integrada B17](https://github.com/publiomcko-labs/sandbox_v2_mvp_rustBevy/actions/runs/45688167846)
 
 ## Objetivo
 
@@ -26,7 +43,7 @@ Validar do zero um sandbox 3D de terreno volumétrico SDF editável, cavernas, s
 | Física | Colisões, gravidade e atrito de rochas; empuxo/arrasto e interação com água |
 | Persistência | Restaurar terreno editado e estados alterados dos objetos |
 
-O benchmark será medido no renderizador real, não apenas em tarefas de computação GPU ou testes headless.
+Os critérios abaixo são o contrato original, não uma declaração de homologação integral. Consulte o relatório final B17 para os resultados e as limitações.
 
 - [B1: SDF determinístico, WGSL e testes de paridade](docs/B1_IMPLEMENTATION.md)
 - [B2: extração Surface Nets residente na GPU](docs/B2_IMPLEMENTATION.md)
@@ -37,18 +54,18 @@ O benchmark será medido no renderizador real, não apenas em tarefas de computa
 - [Contrato comum de requisitos e benchmarks](docs/CRITERIOS_COMUNS.md)
 - [Implementação e validação B0](docs/B0_IMPLEMENTATION.md)
 
-## Recursos experimentais recentes (Windows/Vulkan)
+## Configuração integrada B17 (Windows/Vulkan)
 
 | Flag de ambiente | Efeito | Estado |
 |---|---|---|
 | `SANDBOX_B15_5_FIXED_SLABS=1` | Slabs GPU fixos de 32 MiB; evita realocação coletiva de malhas | Aprovado visualmente |
-| `SANDBOX_B15_6_CONSERVATIVE_CULLING=1` | AABB conservador para culling do terreno GPU | E2E, visual local pendente |
-| `SANDBOX_B16_ASYNC_FAR_SHELL=1` | Reconstrói o B11 distante fora da thread principal | E2E, visual local pendente |
+| `SANDBOX_B15_6_CONSERVATIVE_CULLING=1` | AABB conservador para culling do terreno GPU | E2E e visual integrado B17 aprovados |
+| `SANDBOX_B16_ASYNC_FAR_SHELL=1` | Reconstrói o B11 distante fora da thread principal | E2E e visual integrado B17 aprovados |
 | `SANDBOX_B3_BENCH_UNCAPPED=1` | Remove a espera de 16 ms **apenas em testes headless** | Diagnóstico; não alterar a versão interativa |
 
 Para executar o sandbox completo no runtime extraído, use `SANDBOX_STAGE=B11` e habilite explicitamente as opções desejadas. Preserve `assets/shaders` junto ao executável. Os documentos [B15.6](docs/B15_6_CONSERVATIVE_CULLING_E2E_RESULTS.md), [B15.7](docs/B15_7_HEADLESS_PACING_20261125.md) e [B16](docs/B16_ASYNC_FAR_SHELL_E2E_20261125.md) registram os resultados e as limitações.
 
-## Sequência inicial
+## Sequência inicial (histórico)
 
 1. Fixar toolchain/dependências e obter um executável de janela 3D reproduzível.
 2. Implementar o campo SDF e pipeline GPU de classificação, extração de malha e desenho.
@@ -58,7 +75,7 @@ Para executar o sandbox completo no runtime extraído, use `SANDBOX_STAGE=B11` e
 
 **Regra de continuidade:** estado do mundo independente do renderizador, buffers e versões por região, troca atômica de geometria pronta e proibição de descarte visual prematuro. Trabalhos extensos e readbacks não podem bloquear a thread principal.
 
-## Execução
+## Execução das etapas iniciais (histórico)
 
 A B0 compilou e apresentou os dois cubos GPU no Windows/Vulkan. A B2 usa a mesma integração do MeshAllocator com GPU compute para gerar uma amostra estática de terreno SDF; o stream de 130m é B3. Para executar o artefato baixado do Actions, extraia-o preservando `assets/shaders/compute_mesh.wesl` e abra o terminal na raiz extraída antes de executar `./sandbox-game.exe`.
 
