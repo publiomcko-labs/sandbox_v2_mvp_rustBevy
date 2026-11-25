@@ -12,6 +12,7 @@ param(
     [ValidateSet('Nvenc','Cpu')][string]$Encoder = 'Nvenc',
     [ValidateSet('Dxgi','Gdi')][string]$CaptureBackend = 'Dxgi',
     [ValidateRange(0,16)][int]$DxgiOutputIdx = 0,
+    [string]$PresentMonPath = '',
     [switch]$ContractTest
 )
 $ErrorActionPreference = 'Stop'
@@ -135,6 +136,8 @@ $env:SANDBOX_B15_1_STABLE_SLABS = '1'
 $env:SANDBOX_B15_1_SCRIPTED_EDITS = if ($Mode -eq 'Auto') { '1' } else { '0' }
 $env:SANDBOX_B9_CREATIVE = '1'
 $env:SANDBOX_B14_TRACE_DIR = $trace
+# B15.4 synchronized per-frame cost columns, equal in both B11 A/B arms.
+$env:SANDBOX_B15_4_CORRELATE = '1'
 $env:SANDBOX_B4_SAVE_PATH = Join-Path $session 'world-b4.edits'
 $env:SANDBOX_B5_SAVE_PATH = Join-Path $session 'world-b5-rocks.txt'
 $env:SANDBOX_B2_HEADLESS = '0'
@@ -151,6 +154,9 @@ if ($Mode -eq 'Auto') {
     Remove-Item Env:SANDBOX_B3_ROUTE -ErrorAction SilentlyContinue
 }
 $game = $null
+$presentMon = $null
+$presentMonCsv = Join-Path $session 'presentmon.csv'
+$presentMonStarted = $false
 try {
     $gameLaunch = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $game = Start-Process -FilePath $exe -WorkingDirectory $AppDir -PassThru `
@@ -250,6 +256,21 @@ try {
         if ($DxgiOutputIdx -ne 0) {
             Write-Warning 'DXGI output index must correspond to this physical display; verify video pixels in preflight.'
         }
+    }
+    # Own the ETW collector process strictly within this game session.
+    # PresentMon's --date_time provides absolute timing for B14 correlation.
+    # Service Session 0 runners must NOT attempt this desktop ETW capture.
+    if (-not [string]::IsNullOrWhiteSpace($PresentMonPath)) {
+        if (-not (Test-Path -LiteralPath $PresentMonPath -PathType Leaf)) {
+            throw "B15_4_PRESENTMON_NOT_FOUND: $PresentMonPath"
+        }
+        $pmDuration = $DurationSeconds + 90
+        $pmArgs = '--process_id {0} --output_file "{1}" --date_time --timed {2} --terminate_on_proc_exit --no_console_stats --session_name B154_{0}' -f $game.Id, $presentMonCsv, $pmDuration
+        $presentMon = Start-Process -FilePath $PresentMonPath -ArgumentList $pmArgs -PassThru `
+            -RedirectStandardOutput (Join-Path $session 'presentmon.stdout.log') `
+            -RedirectStandardError (Join-Path $session 'presentmon.stderr.log')
+        $presentMonStarted = $true
+        Write-Host "B15_4_PRESENTMON_STARTED pid=$($presentMon.Id) game_pid=$($game.Id)"
     }
     if ($Mode -eq 'Auto') {
         # The survey route holds the camera still for its first 12 game seconds.
@@ -368,6 +389,9 @@ try {
         ffmpeg_version = $ffmpegVersion
         capture_source_offset = [ordered]@{ x=$captureX; y=$captureY }
         scripted_edits_requested = if ($Mode -eq 'Auto') { 6 } else { 0 }
+        b15_4_correlate = $true
+        presentmon_requested = (-not [string]::IsNullOrWhiteSpace($PresentMonPath))
+        presentmon_csv = if ($presentMonStarted) { 'presentmon.csv' } else { $null }
         far_shell = $FarShell
         atomic_edits = $AtomicEdits
         expected_requested_fps = $Fps
@@ -393,6 +417,20 @@ try {
         Stop-Process -Id $game.Id -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 500
     }
+    if ($presentMon) {
+        try {
+            if (-not $presentMon.WaitForExit(8000)) {
+                Stop-Process -Id $presentMon.Id -Force -ErrorAction SilentlyContinue
+            }
+        } catch { Write-Warning "B15_4_PRESENTMON_SHUTDOWN_WARNING: $($_.Exception.Message)" }
+        $pmBytes = if (Test-Path -LiteralPath $presentMonCsv) {
+            (Get-Item -LiteralPath $presentMonCsv).Length
+        } else { 0 }
+        Write-Host "B15_4_PRESENTMON_CSV_BYTES=$pmBytes"
+        if ($pmBytes -lt 1000) {
+            Write-Warning "B15_4_PRESENTMON_UNQUALIFIED: missing or empty external present data; inspect presentmon logs"
+        }
+    }
     if ($Mode -eq 'Auto') {
         $gameLog = Join-Path $session 'game.stderr.log'
         $scriptedCount = 0
@@ -411,6 +449,9 @@ try {
     Compress-Archive -Path (Join-Path $session '*') -DestinationPath $archive -Force
     Write-Host "B15_2_READY_FOR_REVIEW: $archive"
 } finally {
+    if ($presentMon) {
+        try { if (-not $presentMon.HasExited) { Stop-Process -Id $presentMon.Id -Force -ErrorAction SilentlyContinue } } catch {}
+    }
     if ($game) {
         try { if (-not $game.HasExited) { Stop-Process -Id $game.Id -Force -ErrorAction SilentlyContinue } } catch {}
     }
