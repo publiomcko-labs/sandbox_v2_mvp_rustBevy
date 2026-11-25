@@ -1,6 +1,6 @@
 # Validate only syntax; does not execute the scripts or require FFmpeg.
 $ErrorActionPreference = 'Stop'
-foreach ($script in @('scripts/b15-2-windows-matrix.ps1', 'scripts/b15-2-local-60fps.ps1')) {
+foreach ($script in @('scripts/b15-2-windows-matrix.ps1', 'scripts/b15-2-local-60fps.ps1', 'scripts/b15-3-local-dxgi-matrix.ps1')) {
     $tokens = $null
     $errors = $null
     $path = Join-Path (Get-Location).Path $script
