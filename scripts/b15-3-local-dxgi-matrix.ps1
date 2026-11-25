@@ -84,8 +84,20 @@ foreach ($arm in $arms) {
         $at = [int][Math]::Ceiling(0.95 * $sorted.Count) - 1
         $p95 = [Math]::Round($sorted[$at],2)
     }
+    $lodBad = 0
+    $postEditSeamRepairBlocks = 0
+    $lastHorizon = @($log -split '[\r\n]+' |
+        Where-Object { $_ -match 'B3 horizon coverage' } | Select-Object -Last 1)
+    if ($lastHorizon.Count -gt 0) {
+        if ($lastHorizon[0] -match 'lod_bad_frames=(\d+)') { $lodBad = [int]$Matches[1] }
+        if ($lastHorizon[0] -match 'b15_2_post_edit_repair_blocks=(\d+)') {
+            $postEditSeamRepairBlocks = [int]$Matches[1]
+        }
+    }
     $reason = @()
     if (-not $meta.video_fps_qualified) { $reason += 'capture_below_50fps' }
+    if ($p95 -gt 16.7) { $reason += 'game_frame_interval_p95_above_16_7ms' }
+    if ($lodBad -gt 0) { $reason += 'lod_bad_frames' }
     if ($edits -ne 6) { $reason += 'scripted_edits_not_six' }
     if ($cohorts -lt 6) { $reason += 'atomic_cohorts_not_six' }
     if ($missingAfter20 -ne 0) { $reason += 'logical_coverage_missing' }
@@ -109,6 +121,8 @@ foreach ($arm in $arms) {
         max_edit_publication_ms = [Math]::Round($maxEditMs,2)
         edit_publications_above_100ms = $editsAbove100ms
         missing_logical_after_20s = $missingAfter20
+        lod_bad_frames = $lodBad
+        post_edit_seam_repair_blocks = $postEditSeamRepairBlocks
         far_shell_updates = $shellUpdates
         runtime_errors = $errorCount
         status = if ($reason.Count -eq 0) { 'TELEMETRY_PASS_PIXEL_PENDING' } else { 'HOLD' }
