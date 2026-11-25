@@ -31,13 +31,14 @@ if (!$OutputRoot) { $OutputRoot = Join-Path $root 'reports\comparison-v1' }
 $stamp = [DateTimeOffset]::UtcNow.ToString('yyyyMMdd-HHmmss-fff')
 $run = Join-Path $OutputRoot "bevy-$Profile-$stamp"
 New-Item -ItemType Directory -Force -Path $run | Out-Null
-if (!$StateRoot) {
-    if ($Profile -eq 'warm') { throw 'Warm profile requires -StateRoot from previous cold run.' }
-    $StateRoot = Join-Path $run 'world'
-}
-New-Item -ItemType Directory -Force -Path $StateRoot | Out-Null
-if ($Profile -eq 'warm' -and !(Test-Path (Join-Path $StateRoot 'world-b4.edits'))) {
-    throw "Warm edit save missing: $StateRoot"
+$runState = Join-Path $run 'world'
+New-Item -ItemType Directory -Force -Path $runState | Out-Null
+if ($Profile -eq 'warm') {
+    if (!$StateRoot) { throw 'Warm profile requires -StateRoot from a previous cold run.' }
+    if (!(Test-Path (Join-Path $runState 'world-b4.edits'))) { throw "Warm edit save missing: $StateRoot" }
+    Copy-Item -Path (Join-Path $StateRoot '*') -Destination $runState -Recurse -Force
+} elseif ($StateRoot) {
+    throw 'Cold profile always creates a new isolated state. Omit -StateRoot.'
 }
 $env:SANDBOX_COMPARISON_V1 = '1'
 $env:SANDBOX_COMPARISON_TRACE_CSV = Join-Path $run 'frames.csv'
@@ -64,7 +65,7 @@ $env:SANDBOX_B10_CAPTURE_TIMES = ''
 $env:SANDBOX_B15_5_CAPTURE_TIMES = ''
 $env:SANDBOX_B15_RASTER_DIR = ''
 $env:SANDBOX_B4_SAVE_PATH = Join-Path $StateRoot 'world-b4.edits'
-$env:SANDBOX_B5_SAVE_PATH = Join-Path $StateRoot 'world-b5-rocks.txt'
+$env:SANDBOX_B5_SAVE_PATH = Join-Path $runState 'world-b5-rocks.txt'
 $env:WGPU_BACKEND = 'vulkan'
 $env:RUST_LOG = 'info,sandbox_gpu_terrain::b2=warn,sandbox_gpu_terrain::b2::b3=info'
 $stdout = Join-Path $run 'stdout.log'
@@ -109,4 +110,4 @@ $metadata = Join-Path $run 'metadata.json'
 $meta | ConvertTo-Json -Depth 9 | Set-Content -LiteralPath $metadata -Encoding UTF8
 & python.exe (Join-Path $root 'scripts\comparison-v1-reduce.py') --csv $env:SANDBOX_COMPARISON_TRACE_CSV --contract (Join-Path $root 'benchmarks\comparison-v1.json') --metadata $metadata --out (Join-Path $run 'comparison-v1-result.json')
 if ($LASTEXITCODE -ne 0) { throw 'Comparison reducer rejected Bevy data' }
-Write-Host "COMPARISON_V1_DONE report=$run state=$StateRoot"
+Write-Host "COMPARISON_V1_DONE report=$run state=$runState"
