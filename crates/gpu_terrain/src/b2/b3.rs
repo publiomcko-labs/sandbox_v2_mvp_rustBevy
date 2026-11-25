@@ -246,6 +246,9 @@ struct StreamWorld {
     b15_2_edit_cohort_blocks: u64,
     b15_2_post_edit_repair_blocks: u64,
     b15_2_last_edit_frame: Option<u64>,
+    // B15.4: last PostUpdate streaming CPU duration, sampled by the B14
+    // Last-schedule correlator in the same frame (both B11 A/B arms).
+    b15_4_stream_cpu_last_us: u32,
 }
 
 fn setup_b3_scene(
@@ -975,7 +978,8 @@ fn stream_b3(
         }
     }
 
-        let elapsed_us = cpu_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+    let elapsed_us = cpu_start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+    state.b15_4_stream_cpu_last_us = elapsed_us;
     state.cpu_samples_us.push(elapsed_us);
     if state.frame % 60 == 0 {
         // This is deliberately a fresh plan. All reported required/missing
