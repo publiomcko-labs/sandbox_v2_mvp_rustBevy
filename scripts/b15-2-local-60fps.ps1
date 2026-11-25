@@ -80,7 +80,7 @@ $ffmpegVersion = @(& $ffmpeg.Source -version | Select-Object -First 1)[0]
 if ($CaptureBackend -eq 'Dxgi') {
     $filterList = @(& $ffmpeg.Source -hide_banner -filters)
     if ($LASTEXITCODE -ne 0 -or
-        -not @($filterList | Where-Object { $_ -match '\\bddagrab\\b' }).Count) {
+        -not @($filterList | Where-Object { $_ -like '*ddagrab*' }).Count) {
         throw "B15_3_DXGI_FILTER_MISSING: $($ffmpeg.Source) has no ddagrab. Use FFmpeg 7.1.1 full_build."
     }
 }
