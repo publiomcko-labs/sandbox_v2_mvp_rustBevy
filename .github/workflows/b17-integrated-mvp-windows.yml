@@ -1,0 +1,72 @@
+name: B17 integrated MVP essential Windows Vulkan E2E
+on:
+  push:
+    branches:
+      - 'exp/b17-integrated-mvp-20261125'
+permissions:
+  contents: read
+concurrency:
+  group: b17-integrated-mvp
+  cancel-in-progress: true
+jobs:
+  windows-vulkan-e2e:
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      CARGO_TARGET_DIR: ${{ github.workspace }}\..\_b6_cargo_target
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reuse existing Windows MSVC Rust toolchain
+        shell: cmd
+        env:
+          CARGO_HOME: ${{ runner.temp }}\b0-cargo
+          RUSTUP_HOME: ${{ runner.temp }}\b0-rustup
+        run: |
+          if not exist "%CARGO_HOME%\bin\rustup.exe" (
+            curl.exe --proto =https --tlsv1.2 --retry 3 -fL -o "%RUNNER_TEMP%\rustup-init.exe" https://win.rustup.rs/x86_64
+            if errorlevel 1 exit /b 1
+            "%RUNNER_TEMP%\rustup-init.exe" -y --no-modify-path --default-toolchain none
+            if errorlevel 1 exit /b 1
+          )
+          "%CARGO_HOME%\bin\rustup.exe" toolchain install 1.100.0 --profile minimal --no-self-update
+          if errorlevel 1 exit /b 1
+          echo %CARGO_HOME%\bin>>"%GITHUB_PATH%"
+          echo CARGO_HOME=%CARGO_HOME%>>"%GITHUB_ENV%"
+          echo RUSTUP_HOME=%RUSTUP_HOME%>>"%GITHUB_ENV%"
+      - name: Check PowerShell E2E test syntax
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$e=$null;$t=$null;[void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path (Get-Location) 'scripts\b17-windows-integrated-e2e.ps1'),[ref]$t,[ref]$e);if($e.Count -gt 0){$e|Out-String|Write-Host;exit 1}"
+      - name: Build Rust Release once with both opt-in optimizations
+        shell: cmd
+        run: cargo +1.100.0 build --release --locked -p sandbox-game
+      - name: Stage Windows headless Vulkan runtime
+        shell: cmd
+        run: |
+          if not exist "b14-runtime\assets" mkdir "b14-runtime\assets"
+          copy /Y "%CARGO_TARGET_DIR%\release\sandbox-game.exe" "b14-runtime\sandbox-game.exe"
+          if errorlevel 1 exit /b 1
+          xcopy /E /I /Y "assets\shaders" "b14-runtime\assets\shaders"
+          if errorlevel 1 exit /b 1
+      - name: Run matched B15.5 control vs B17 integrated 1080p Vulkan E2E
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b17-windows-integrated-e2e.ps1"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b17-integrated-e2e-evidence
+          path: b17-evidence/
+          if-no-files-found: warn
+      - name: Stage interactive launcher after E2E
+        shell: cmd
+        run: |
+          copy /Y "scripts\b17-play.ps1" "b14-runtime\b17-play.ps1"
+          if errorlevel 1 exit /b 1
+      - if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b17-windows-runtime
+          path: b14-runtime/
+          if-no-files-found: error
