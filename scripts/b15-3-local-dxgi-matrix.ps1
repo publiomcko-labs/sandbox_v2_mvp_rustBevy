@@ -7,6 +7,7 @@ param(
     [ValidateRange(15,300)][int]$DurationSeconds = 120,
     [ValidateRange(24,60)][int]$Fps = 60,
     [ValidateRange(0,16)][int]$DxgiOutputIdx = 0,
+    [string]$PresentMonPath = '',
     [switch]$ContractTest
 )
 $ErrorActionPreference = 'Stop'
@@ -49,11 +50,18 @@ foreach ($arm in $arms) {
     $far = $arm.Far
     Write-Host "B15_3_ARM_BEGIN name=$name duration=$DurationSeconds fps=$Fps"
     # New capture session and new B4/B5 save files each arm.
-    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$runner" `
-        -AppDir $AppDir -OutputRoot $OutputRoot -Mode Auto `
-        -DurationSeconds $DurationSeconds -Fps $Fps `
-        -FarShell $far -AtomicEdits 1 -Encoder Nvenc `
-        -CaptureBackend Dxgi -DxgiOutputIdx $DxgiOutputIdx
+    $runArgs = @(
+        '-NoLogo','-NoProfile','-ExecutionPolicy','Bypass',
+        '-File',"$runner",
+        '-AppDir',"$AppDir",'-OutputRoot',"$OutputRoot",'-Mode','Auto',
+        '-DurationSeconds',"$DurationSeconds",'-Fps',"$Fps",
+        '-FarShell',"$far",'-AtomicEdits','1','-Encoder','Nvenc',
+        '-CaptureBackend','Dxgi','-DxgiOutputIdx',"$DxgiOutputIdx"
+    )
+    if (-not [string]::IsNullOrWhiteSpace($PresentMonPath)) {
+        $runArgs += @('-PresentMonPath',"$PresentMonPath")
+    }
+    & powershell.exe @runArgs
     if ($LASTEXITCODE -ne 0) {
         throw "B15_3_ARM_FAILED name=$name exit=$LASTEXITCODE. Inspect latest session logs under $OutputRoot"
     }
@@ -68,6 +76,8 @@ foreach ($arm in $arms) {
     $metaPath = Join-Path $session 'b15-2-recording.json'
     $gameLog = Join-Path $session 'game.stderr.log'
     $framesPath = Join-Path $session 'trace\b14-frames.csv'
+    $costPath = Join-Path $session 'trace\b15-4-costs.csv'
+    $presentPath = Join-Path $session 'presentmon.csv'
     $videoPath = Join-Path $session 'game-window-60fps.mp4'
     if (-not (Test-Path $metaPath) -or -not (Test-Path $gameLog) -or
         -not (Test-Path $framesPath) -or -not (Test-Path $videoPath)) {
@@ -129,6 +139,22 @@ foreach ($arm in $arms) {
         }
     }
     $reason = @()
+    $costRows = 0
+    if (Test-Path -LiteralPath $costPath) {
+        $costRows = @(Import-Csv -LiteralPath $costPath).Count
+        if ([math]::Abs($costRows - $rows.Count) -gt 2) {
+            $reason += 'b15_4_frame_cost_count_mismatch'
+        }
+    } else {
+        $reason += 'b15_4_cost_trace_missing'
+    }
+    $presentBytes = 0
+    if (Test-Path -LiteralPath $presentPath) {
+        $presentBytes = (Get-Item -LiteralPath $presentPath).Length
+    }
+    if (-not [string]::IsNullOrWhiteSpace($PresentMonPath) -and $presentBytes -lt 1000) {
+        $reason += 'presentmon_missing_or_empty'
+    }
     if ($lastHorizon.Count -eq 0) { $reason += 'missing_final_horizon_audit' }
     if ($latencyMatches.Count -eq 0 -and $edits -gt 0) {
         $reason += 'missing_edited_mesh_publications'
@@ -150,6 +176,9 @@ foreach ($arm in $arms) {
         capture_backend = $meta.capture_backend
         encoder = $meta.video_encoder
         encoded_fps = $meta.video_encoded_fps
+        b15_4_cost_rows = $costRows
+        presentmon_bytes = $presentBytes
+        presentmon_requested = (-not [string]::IsNullOrWhiteSpace($PresentMonPath))
         preflight_pixel_delta = $meta.dynamic_preflight_delta
         b14_frame_rows = $rows.Count
         b14_frame_interval_p95_ms = $p95
@@ -182,6 +211,7 @@ $summary = [ordered]@{
     created_utc = [DateTimeOffset]::UtcNow.ToString('o')
     duration_seconds_per_arm = $DurationSeconds
     fps_requested = $Fps
+    presentmon_requested = (-not [string]::IsNullOrWhiteSpace($PresentMonPath))
     arms = @($results)
     caveats = @(
         'Actual encoded FPS does not prove distinct on-screen presented frames',
