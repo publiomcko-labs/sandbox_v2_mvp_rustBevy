@@ -12,7 +12,11 @@ use bevy::{
     render::render_resource::PrimitiveTopology,
 };
 use sandbox_world_core::density::terrain_height_half;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::{Mutex, OnceLock, mpsc::{self, Receiver, TryRecvError}},
+    thread,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 const SEED: u32 = 42;
 const STEP_M: i32 = 8;
@@ -22,12 +26,39 @@ const GROUND_BIAS_M: f32 = 1.25;
 const CENTER_SNAP_M: f32 = 48.0;
 const SWAP_DELAY_FRAMES: u8 = 8;
 
+type FarGeometry = (Vec<[f32;3]>, Vec<[f32;3]>, Vec<[f32;2]>, Vec<u32>);
+
+struct FarBuildTask {
+    center: (i32,i32),
+    receiver: Mutex<Receiver<(FarGeometry, u128)>>,
+}
+
 #[derive(Default, Resource)]
 struct FarCoverage {
     center: Option<(i32,i32)>,
     active: Option<(Entity,Handle<Mesh>)>,
     pending: Option<(Entity,Handle<Mesh>,u8)>,
+    build_task: Option<FarBuildTask>,
     revisions: u64,
+}
+
+fn asynchronous_far_shell_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SANDBOX_B16_ASYNC_FAR_SHELL").as_deref() == Ok("1")
+    })
+}
+
+fn start_async_geometry(center:(i32,i32))->FarBuildTask {
+    let (sender,receiver)=mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let started=Instant::now();
+        let geometry=shell_geometry(center);
+        let cpu_us=started.elapsed().as_micros();
+        // Game may already be exiting; a detached worker must not panic.
+        let _=sender.send((geometry,cpu_us));
+    });
+    FarBuildTask{center,receiver:Mutex::new(receiver)}
 }
 pub struct B11FarVisualCoveragePlugin;
 
@@ -44,7 +75,7 @@ fn snapped_center(camera:Vec3)->(i32,i32){
 fn height(x:i32,z:i32)->f32 {
     terrain_height_half(SEED,x*2,z*2)-GROUND_BIAS_M
 }
-fn shell_geometry(center:(i32,i32))->(Vec<[f32;3]>,Vec<[f32;3]>,Vec<[f32;2]>,Vec<u32>){
+fn shell_geometry(center:(i32,i32))->FarGeometry{
     const SIDE: usize=(2*OUTER_RADIUS_M/STEP_M+1) as usize;
     let mut vertices=Vec::with_capacity(SIDE*SIDE);
     let mut normals=Vec::with_capacity(SIDE*SIDE);
@@ -80,8 +111,8 @@ fn shell_geometry(center:(i32,i32))->(Vec<[f32;3]>,Vec<[f32;3]>,Vec<[f32;2]>,Vec
     }
     (vertices,normals,uvs,indices)
 }
-fn create_shell_mesh(center:(i32,i32))->Mesh {
-    let (vertices,normals,uvs,indices)=shell_geometry(center);
+fn mesh_from_geometry(geometry:FarGeometry)->Mesh {
+    let (vertices,normals,uvs,indices)=geometry;
     Mesh::new(PrimitiveTopology::TriangleList,RenderAssetUsages::default())
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION,vertices)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL,normals)
@@ -131,12 +162,62 @@ fn maintain_far_coverage(
         }
     }
     let snapped=snapped_center(camera.translation);
-    if state.center==Some(snapped) || state.pending.is_some() {
+    if state.pending.is_some() { return; }
+    let asynchronous = asynchronous_far_shell_enabled();
+    let mut worker_compute_us = None;
+    let mut completed_geometry = None;
+
+    if asynchronous {
+        if let Some(task) = state.build_task.as_ref() {
+            let finished = match task.receiver.lock() {
+                Ok(receiver) => receiver.try_recv(),
+                Err(_) => Err(TryRecvError::Disconnected),
+            };
+            match finished {
+                Ok((geometry, compute_us)) => {
+                    let finished_center = task.center;
+                    state.build_task.take();
+                    if finished_center == snapped {
+                        completed_geometry=Some(geometry);
+                        worker_compute_us=Some(compute_us);
+                    } else {
+                        // Camera changed during computation: never publish
+                        // stale coverage. Keep the old shell while rebuilding.
+                        info!(built_x=finished_center.0,built_z=finished_center.1,
+                            target_x=snapped.0,target_z=snapped.1,
+                            "B16 discarded stale far shell worker result");
+                    }
+                },
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    state.build_task.take();
+                    warn!("B16 far shell worker disconnected; retaining prior shell and retrying");
+                }
+            }
+        }
+    }
+    if state.center==Some(snapped) && completed_geometry.is_none() {
         return;
     }
+    if asynchronous && state.active.is_some() && completed_geometry.is_none() {
+        // Initial coverage stays synchronous, but subsequent expensive CPU
+        // geometry generation is off the frame's main thread. Only one
+        // worker is active at a time; the old mesh remains drawable.
+        state.build_task=Some(start_async_geometry(snapped));
+        info!(center_x=snapped.0,center_z=snapped.1,
+            "B16 async far shell generation scheduled");
+        return;
+    }
+
     let build_started = Instant::now();
-    let mesh=meshes.add(create_shell_mesh(snapped));
+    let geometry = completed_geometry.unwrap_or_else(||shell_geometry(snapped));
+    let mesh=meshes.add(mesh_from_geometry(geometry));
     let build_us = build_started.elapsed().as_micros();
+    if let Some(compute_us)=worker_compute_us {
+        info!(center_x=snapped.0,center_z=snapped.1,
+            worker_compute_us=compute_us, main_publish_us=build_us,
+            "B16 far shell async geometry produced");
+    }
     let entity=commands.spawn((
         Mesh3d(mesh.clone()),
         MeshMaterial3d(shader_material.as_ref().unwrap().clone()),
