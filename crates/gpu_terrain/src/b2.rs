@@ -28,7 +28,7 @@ use bevy::{
     },
 };
 use sandbox_world_core::{BlockCoord, density::DensityGrid, edits::{Brush, EditMode, MAX_GPU_BRUSHES_PER_BLOCK}};
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Instant};
 
 const SEED: u32 = 42;
 const DENSITY_SHADER: &str = "shaders/sdf_density_b4.wgsl";
@@ -347,6 +347,7 @@ fn prepare_b2(
     b3_ready: Option<Res<b3::B3ReadySet>>,
     mut frame: Local<u64>,
 ) {
+    let b15_4_prep_started = Instant::now();
     if cache.get_compute_pipeline(pipelines.density).is_none()
         || cache.get_compute_pipeline(pipelines.vertices).is_none()
         || cache.get_compute_pipeline(pipelines.indices).is_none()
@@ -402,6 +403,7 @@ fn prepare_b2(
     pending.0.extend(normal_jobs.into_iter().take(remaining));
     if !relocated.is_empty() {
         warn!(relocations=relocated.len(), scheduled=pending.0.len(),
+            prepare_cpu_us=b15_4_prep_started.elapsed().as_micros(),
             "B15.1 GPU relocated live meshes prioritized for same-frame re-extraction");
     }
 }
