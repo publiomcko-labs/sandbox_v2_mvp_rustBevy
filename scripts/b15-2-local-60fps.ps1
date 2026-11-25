@@ -26,6 +26,28 @@ function Get-B15_4PresentMonFailure {
         Select-Object -Last 5) -join ' | '
     return "B15_4_PRESENTMON_START_FAILED exit=$ExitCode details=$tail"
 }
+function Get-B15_4DxgiWindowShift {
+    param(
+        [int]$X, [int]$Y, [int]$Width, [int]$Height,
+        [int]$MonitorLeft, [int]$MonitorTop, [int]$MonitorRight, [int]$MonitorBottom
+    )
+    $displayW = $MonitorRight - $MonitorLeft
+    $displayH = $MonitorBottom - $MonitorTop
+    if ($Width -gt $displayW -or $Height -gt $displayH) {
+        throw "B15_4_DXGI_WINDOW_TOO_LARGE: capture=${Width}x${Height} monitor=${displayW}x${displayH}"
+    }
+    # Keep an extra margin when possible, without shrinking the game image.
+    $marginX = if (($displayW - $Width) -ge 32) { 16 } else { 0 }
+    $marginY = if (($displayH - $Height) -ge 32) { 16 } else { 0 }
+    $minX = $MonitorLeft + $marginX
+    $minY = $MonitorTop + $marginY
+    $maxX = $MonitorRight - $Width - $marginX
+    $maxY = $MonitorBottom - $Height - $marginY
+    return @{
+        dx = [int]([Math]::Min([Math]::Max($X,$minX),$maxX) - $X)
+        dy = [int]([Math]::Min([Math]::Max($Y,$minY),$maxY) - $Y)
+    }
+}
 function Get-B15_3InputArgs {
     param(
         [string]$Backend, [int]$Rate, [int]$X, [int]$Y,
@@ -74,6 +96,7 @@ public static class B15_2DesktopRect {
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out B15_2_RECT rect);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hwnd, ref B15_2_POINT point);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out B15_2_RECT rect);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
@@ -108,6 +131,18 @@ if ($ContractTest) {
         throw 'B15_4_PRESENTMON_OTHER_FAILURE_CONTRACT_FAILED'
     }
     Write-Host 'B15_4_PRESENTMON_ACCESS_PREFLIGHT_CONTRACT_PASS'
+    $shift = Get-B15_4DxgiWindowShift -X 346 -Y 369 -Width 1920 -Height 1080 -MonitorLeft 0 -MonitorTop 0 -MonitorRight 3440 -MonitorBottom 1440
+    if ($shift.dx -ne 0 -or $shift.dy -ne -25) {
+        throw "B15_4_DXGI_REPOSITION_CONTRACT_FAILED got_dx=$($shift.dx) got_dy=$($shift.dy)"
+    }
+    $stable = Get-B15_4DxgiWindowShift -X 346 -Y 250 -Width 1920 -Height 1080 -MonitorLeft 0 -MonitorTop 0 -MonitorRight 3440 -MonitorBottom 1440
+    if ($stable.dx -ne 0 -or $stable.dy -ne 0) { throw 'B15_4_DXGI_IN_BOUNDS_WINDOW_MOVED' }
+    $rejectLarge = $false
+    try {
+        [void](Get-B15_4DxgiWindowShift -X 0 -Y 0 -Width 4000 -Height 1080 -MonitorLeft 0 -MonitorTop 0 -MonitorRight 3440 -MonitorBottom 1440)
+    } catch { $rejectLarge = $_.Exception.Message -like 'B15_4_DXGI_WINDOW_TOO_LARGE:*' }
+    if (-not $rejectLarge) { throw 'B15_4_DXGI_OVERSIZED_WINDOW_NOT_REJECTED' }
+    Write-Host 'B15_4_DXGI_WINDOW_REPOSITION_CONTRACT_PASS dx=0 dy=-25'
     # Exercise actual P/Invoke struct marshalling: PowerShell 5.1 selects the
     # wrong Marshal.SizeOf overload when handed a RuntimeType.
     $monitorProbe = New-Object B15_2_MONITORINFO
@@ -261,14 +296,52 @@ try {
         if (-not [B15_2DesktopRect]::GetMonitorInfo($monitorHandle, [ref]$monitor)) {
             throw 'B15_3_DXGI_MONITOR_BOUNDS_FAILED'
         }
-        $captureX = [int]($x - $monitor.rcMonitor.Left)
-        $captureY = [int]($y - $monitor.rcMonitor.Top)
         $displayW = [int]($monitor.rcMonitor.Right - $monitor.rcMonitor.Left)
         $displayH = [int]($monitor.rcMonitor.Bottom - $monitor.rcMonitor.Top)
+        $shift = Get-B15_4DxgiWindowShift -X $x -Y $y -Width $w -Height $h `
+            -MonitorLeft $monitor.rcMonitor.Left -MonitorTop $monitor.rcMonitor.Top `
+            -MonitorRight $monitor.rcMonitor.Right -MonitorBottom $monitor.rcMonitor.Bottom
+        if ($shift.dx -ne 0 -or $shift.dy -ne 0) {
+            $outer = New-Object B15_2_RECT
+            if (-not [B15_2DesktopRect]::GetWindowRect($handle, [ref]$outer)) {
+                throw 'B15_4_DXGI_WINDOW_OUTER_RECT_FAILED'
+            }
+            # Keep original HWND and client size. SWP_NOSIZE|NOZORDER|NOACTIVATE = 0x15.
+            if (-not [B15_2DesktopRect]::SetWindowPos($handle, [IntPtr]::Zero,
+                [int]($outer.Left + $shift.dx), [int]($outer.Top + $shift.dy),
+                0, 0, [uint32]0x0015)) {
+                throw 'B15_4_DXGI_WINDOW_MOVE_FAILED'
+            }
+            Start-Sleep -Milliseconds 200
+            $movedClient = New-Object B15_2_RECT
+            $movedPoint = New-Object B15_2_POINT
+            if (-not [B15_2DesktopRect]::GetClientRect($handle, [ref]$movedClient) -or
+                -not [B15_2DesktopRect]::ClientToScreen($handle, [ref]$movedPoint)) {
+                throw 'B15_4_DXGI_WINDOW_REMEASURE_FAILED'
+            }
+            if ($regionSource -eq 'client') {
+                $x = [int]$movedPoint.X
+                $y = [int]$movedPoint.Y
+                $w = [int]([Math]::Floor(($movedClient.Right - $movedClient.Left) / 2.0) * 2)
+                $h = [int]([Math]::Floor(($movedClient.Bottom - $movedClient.Top) / 2.0) * 2)
+            } else {
+                $movedOuter = New-Object B15_2_RECT
+                if (-not [B15_2DesktopRect]::GetWindowRect($handle, [ref]$movedOuter)) {
+                    throw 'B15_4_DXGI_WINDOW_OUTER_REMEASURE_FAILED'
+                }
+                $x = [int]$movedOuter.Left
+                $y = [int]$movedOuter.Top
+                $w = [int]([Math]::Floor(($movedOuter.Right - $movedOuter.Left) / 2.0) * 2)
+                $h = [int]([Math]::Floor(($movedOuter.Bottom - $movedOuter.Top) / 2.0) * 2)
+            }
+            Write-Host "B15_4_DXGI_WINDOW_REPOSITIONED dx=$($shift.dx) dy=$($shift.dy) final_x=$x final_y=$y"
+        }
+        $captureX = [int]($x - $monitor.rcMonitor.Left)
+        $captureY = [int]($y - $monitor.rcMonitor.Top)
         if ($captureX -lt 0 -or $captureY -lt 0 -or
             ($captureX + $w) -gt $displayW -or
             ($captureY + $h) -gt $displayH) {
-            throw "B15_3_DXGI_WINDOW_SPANS_MONITORS: capture=${w}x${h} relative=${captureX},${captureY} monitor=${displayW}x${displayH}. Keep the game entirely on one monitor."
+            throw "B15_4_DXGI_WINDOW_REPOSITION_NOT_CONTAINED: capture=${w}x${h} relative=${captureX},${captureY} monitor=${displayW}x${displayH}"
         }
         Write-Host "B15_3_DXGI_MONITOR output_idx=$DxgiOutputIdx relative=${captureX},${captureY} display=${displayW}x${displayH}"
         if ($DxgiOutputIdx -ne 0) {
