@@ -1,5 +1,6 @@
 //! B3 opt-in streaming; B2 remains a separate GPU-resident reference checkpoint.
 mod player;
+mod comparison;
 mod physics;
 mod visual_capture;
 mod visual_far;
@@ -102,6 +103,9 @@ fn main() {
         app.add_plugins(visual_far::B11FarVisualCoveragePlugin);
     }
     info!(far_field_enabled, "B15.2 distant visual coverage A/B mode");
+    if std::env::var("SANDBOX_COMPARISON_V1").as_deref() == Ok("1") {
+        app.add_plugins(comparison::ComparisonV1Plugin);
+    }
     visual_capture::configure(&mut app);
     visual_raster::configure(&mut app);
     app.add_systems(Update, player::fly_camera).run();
