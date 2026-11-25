@@ -33,9 +33,17 @@ One Rust 1.100.0 release build followed by **two** otherwise identical GPU-headl
 
 A quick visual inspection of the three matched 1080p PNGs from each arm showed the same terrain, rock and water silhouettes, without an obvious static screenshot regression. Three screenshots are not evidence against single-frame cracks or GPU render/presentation issues.
 
-## Decision and minimal remaining gate
+## Visual approval — 2026-11-25
 
-- Preserve the experiment under the B15.5 checkpoint branch, without altering stable B13/B15.2/B15.4 or promoting to `main`.
-- **No more broad instrumentation or capture campaigns needed** to demonstrate allocator-growth elimination.
-- Next action is one **short interactive visual smoke** on the downloaded B15.5 Windows runtime with `SANDBOX_B15_5_FIXED_SLABS=1` and B11/LOD/SDF editing enabled. Manually move and edit terrain, observing any flicker or missing rocks/water; no FFmpeg or PresentMon recording needed.
-- If that smoke is clean, decide whether to adopt fixed slabs as the new experimental default and move to the next performance issue (p95 >16.7ms). Document the additional VRAM/buffer-binding overhead as a scalability risk for later profiling, rather than adding another exhaustive test now.
+The user executed the B15.5 Windows runtime locally with `SANDBOX_B15_5_FIXED_SLABS=1`, B11 enabled, mixed LOD enabled, atomic edits enabled and Vulkan, following the prescribed interactive visual smoke test. The user explicitly approved the result: **no freezes were noticeable to the naked eye**, gameplay felt **substantially smoother**, including **rapid camera rotations**.
+
+This is a **user-observed qualitative visual PASS**, not a quantified monitor frame-time benchmark and not a claim that every future frame meets 16.7ms. The existing paired Vulkan A/B results and six scripted edits remain the quantitative evidence.
+
+## Promotion decision
+
+- **Promote B15.5 as the approved experimental baseline** for subsequent development, retaining the explicit `SANDBOX_B15_5_FIXED_SLABS=1` configuration; no need to change production defaults in `main`.
+- Preserve B13 stable and B15.2/B15.4 checkpoints; do not merge into `main` without a separate decision.
+- The 32 MiB fixed-slab policy eliminated measured allocator relocations in the matched route and visually improved fluidity. Treat the policy as a qualified working candidate.
+- No further repeated long ETW/DXGI recordings or exhaustive instrumentation tests are required to close B15.5.
+- **Next engineering priority:** reduce the remaining p95 B14 frame gap (**19ms**, strict target **16.7ms**) with one targeted profiling/optimization intervention. Preserve mesh, LOD, SDF, rocks, water and horizon behavior. The long-term VRAM/buffer-count tradeoff remains an acknowledged scalability consideration.
+
