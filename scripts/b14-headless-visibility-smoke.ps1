@@ -57,7 +57,7 @@ $summary = [ordered]@{
     screenshot_last_confirmed = $log -match 'B2 visual CI: screenshot captured at[^\r\n]*sequence_index=2'
     audit_enabled = $log -match 'B14 per-frame visibility trace enabled'
     physics_guard_enabled = $log -match 'B13 physics rock/collider residency guard'
-    terrain_frustum_protection = $log -match 'B13 GPU mesh visibility: frustum culling disabled'
+    terrain_frustum_protection = ($log -match 'B13 GPU mesh visibility: frustum culling disabled' -or $log -match 'B15.6 conservative GPU terrain frustum culling enabled')
 }
 $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $report 'B14_SUMMARY.json') -Encoding UTF8
 $summary | Format-List | Out-String | Write-Host
