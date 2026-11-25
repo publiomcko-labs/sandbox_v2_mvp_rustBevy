@@ -35,7 +35,7 @@ $runState = Join-Path $run 'world'
 New-Item -ItemType Directory -Force -Path $runState | Out-Null
 if ($Profile -eq 'warm') {
     if (!$StateRoot) { throw 'Warm profile requires -StateRoot from a previous cold run.' }
-    if (!(Test-Path (Join-Path $runState 'world-b4.edits'))) { throw "Warm edit save missing: $StateRoot" }
+    if (!(Test-Path (Join-Path $StateRoot 'world-b4.edits'))) { throw "Warm edit save missing: $StateRoot" }
     Copy-Item -Path (Join-Path $StateRoot '*') -Destination $runState -Recurse -Force
 } elseif ($StateRoot) {
     throw 'Cold profile always creates a new isolated state. Omit -StateRoot.'
@@ -64,7 +64,7 @@ $env:SANDBOX_B2_CAPTURE_PATH = ''
 $env:SANDBOX_B10_CAPTURE_TIMES = ''
 $env:SANDBOX_B15_5_CAPTURE_TIMES = ''
 $env:SANDBOX_B15_RASTER_DIR = ''
-$env:SANDBOX_B4_SAVE_PATH = Join-Path $StateRoot 'world-b4.edits'
+$env:SANDBOX_B4_SAVE_PATH = Join-Path $runState 'world-b4.edits'
 $env:SANDBOX_B5_SAVE_PATH = Join-Path $runState 'world-b5-rocks.txt'
 $env:WGPU_BACKEND = 'vulkan'
 $env:RUST_LOG = 'info,sandbox_gpu_terrain::b2=warn,sandbox_gpu_terrain::b2::b3=info'
