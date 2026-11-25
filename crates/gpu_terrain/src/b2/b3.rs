@@ -11,7 +11,7 @@ use super::{
 };
 use bevy::{
     asset::RenderAssetUsages,
-    camera::{RenderTarget, visibility::NoFrustumCulling},
+    camera::{RenderTarget, primitives::Aabb, visibility::{NoAutoAabb, NoFrustumCulling}},
     core_pipeline::schedule::camera_driver,
     mesh::Indices,
     prelude::*,
@@ -32,7 +32,7 @@ use sandbox_streaming::{
 use sandbox_world_core::{BlockCoord, density::{DensityGrid, terrain_height_half}, edits::{Brush, EditMode, WorldEdits}};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::Instant,
     path::PathBuf,
 };
@@ -43,6 +43,26 @@ const OPTIMIZED_BLOCKS_PER_FRAME: usize = 5;
 const PLAN_UPDATE_DISTANCE_M: f32 = 1.5;
 const PLAN_UPDATE_MAX_AGE_FRAMES: u64 = 12;
 const DIRECTION_COSINE_THRESHOLD: f32 = 0.96;
+
+// GPU Surface Nets vertices span the 16m block plus one negative halo;
+// transition dual vertices may extend by the neighboring 2m LOD2 cell.
+// An extra 2m margin makes frustum culling conservative across LOD and edits.
+const B15_6_CULL_MIN_M: f32 = -4.0;
+const B15_6_CULL_MAX_M: f32 = 20.0;
+
+fn b15_6_conservative_culling_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SANDBOX_B15_6_CONSERVATIVE_CULLING").as_deref() == Ok("1")
+    })
+}
+
+fn b15_6_generated_mesh_aabb() -> Aabb {
+    Aabb::from_min_max(
+        Vec3::splat(B15_6_CULL_MIN_M),
+        Vec3::splat(B15_6_CULL_MAX_M),
+    )
+}
 
 /// MainWorld ↔ RenderWorld: renderer inserts IDs after all compute passes
 /// have been encoded. MainWorld consumes readiness on a subsequent frame.
@@ -341,7 +361,12 @@ fn setup_b3_scene(
     } else {
         commands.spawn((Camera3d::default(), camera_transform));
     }
-    info!("B13 GPU mesh visibility: frustum culling disabled for compute-produced vertices");
+    if b15_6_conservative_culling_enabled() {
+        info!(min_m=B15_6_CULL_MIN_M, max_m=B15_6_CULL_MAX_M,
+            "B15.6 conservative GPU terrain frustum culling enabled");
+    } else {
+        info!("B13 GPU mesh visibility: frustum culling disabled for compute-produced vertices");
+    }
     info!(
         "B3 streaming stage initialized: 130m horizon, 36m directional prefetch, uniform LOD2, 18m/s route optional"
     );
@@ -383,11 +408,6 @@ fn create_block(
             Mesh3d(handle.clone()),
             MeshMaterial3d(material.clone()),
             Visibility::Hidden,
-            // Positions and indices are generated after mesh allocation on the
-            // GPU. The CPU placeholder has only zero vertices, so its AABB
-            // cannot be trusted for camera-frustum rejection. Keep B3's
-            // actually resident geometry drawable, as B2 already does.
-            NoFrustumCulling,
             Transform::from_xyz(
                 coord.x as f32 * 16.0,
                 coord.y as f32 * 16.0,
@@ -395,6 +415,14 @@ fn create_block(
             ),
         ))
         .id();
+    if b15_6_conservative_culling_enabled() {
+        // Prevent CPU all-zero placeholders from overwriting the bounds on
+        // asset changes and LOD mesh swaps. Geometry remains fully GPU-owned.
+        commands.entity(entity).insert((b15_6_generated_mesh_aabb(), NoAutoAabb));
+    } else {
+        // B13/B15.5 fallback unchanged for comparison and rollback.
+        commands.entity(entity).insert(NoFrustumCulling);
+    }
     Some(ActiveBlock {
         mesh: handle,
         entity,
@@ -1057,6 +1085,28 @@ fn stream_b3(
                 missing = required - visible,
                 "B3 incomplete horizon; gate remains HOLD"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod b15_6_tests {
+    use super::*;
+
+    #[test]
+    fn conservative_bounds_enclose_lod0_to_lod2_and_transition_halo() {
+        let bounds = b15_6_generated_mesh_aabb();
+        for lod in 0..=2 {
+            let grid = DensityGrid::new(BlockCoord { x: -1, y: 0, z: 1 }, lod).unwrap();
+            let spacing = grid.step_half as f32 * 0.5;
+            // Surface Nets owns one negative halo and the transition may
+            // sample the coarser LOD2 neighbor (max cell spacing 2m).
+            let minimum = -spacing.max(2.0);
+            let maximum = 16.0 + spacing.max(2.0);
+            for axis in 0..3 {
+                assert!(bounds.min()[axis] <= minimum);
+                assert!(bounds.max()[axis] >= maximum);
+            }
         }
     }
 }
