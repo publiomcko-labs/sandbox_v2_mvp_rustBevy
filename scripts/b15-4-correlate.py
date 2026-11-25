@@ -89,6 +89,9 @@ def presentmon_rows(text: str, offset_minutes: int | None) -> tuple[list[dict], 
             continue
         try:
             raw = raw.replace(" ", "T")
+            # PresentMon v2 may write an unpadded hour (e.g. 6:56:29);
+            # datetime.fromisoformat requires a two-digit hour.
+            raw = re.sub(r"^(\d{4}-\d\d-\d\dT)(\d):", r"\g<1>0\2:", raw)
             # Python accepts 6 microseconds; truncate any nanosecond precision.
             raw = re.sub(r"(\.\d{6})\d+", r"\1", raw)
             at = datetime.fromisoformat(raw)
@@ -107,6 +110,38 @@ def presentmon_rows(text: str, offset_minutes: int | None) -> tuple[list[dict], 
                 pass
         output.append(sample)
     return output, "timestamped" if output else "presentmon_unparseable_timestamps"
+
+
+def align_presentmon_to_b14(
+    present: list[dict], b14_unix_ms: list[int]
+) -> tuple[list[dict], int | None, int | None, str]:
+    """Correct whole-hour ETW clock offsets using same-process B14 boundaries.
+
+    PresentMon CSV may encode local wall time with an additional timezone
+    conversion. Do not silently treat its raw DateTime column as UTC.
+    Calibrate only whole-hour offsets, require both endpoints within 15s
+    of the original game trace, and report remaining endpoint discrepancy.
+    """
+    if not present or not b14_unix_ms:
+        return present, None, None, "no_time_data"
+    base_first, base_last = present[0]["unix_ms"], present[-1]["unix_ms"]
+    trace_first, trace_last = b14_unix_ms[0], b14_unix_ms[-1]
+    hour_ms = 60 * 60 * 1000
+    shift = min(
+        (hour * hour_ms for hour in range(-14, 15)),
+        key=lambda delta: (
+            abs(base_first + delta - trace_first)
+            + abs(base_last + delta - trace_last)
+        ),
+    )
+    first_error = abs(base_first + shift - trace_first)
+    last_error = abs(base_last + shift - trace_last)
+    max_endpoint_error = max(first_error, last_error)
+    if max_endpoint_error > 15_000:
+        return [], shift // hour_ms, max_endpoint_error, "presentmon_clock_unaligned"
+    for row in present:
+        row["unix_ms"] += shift
+    return present, shift // hour_ms, max_endpoint_error, "timestamped_b14_aligned"
 
 
 def metrics_for(archive_path: str) -> dict:
@@ -157,6 +192,13 @@ def metrics_for(archive_path: str) -> dict:
     costs = frame_dicts(cost_text) if cost_text else []
     present, present_status = presentmon_rows(
         present_text, meta.get("local_utc_offset_minutes")) if present_text else ([], "not_recorded")
+    clock_hour_correction = None
+    clock_endpoint_error_ms = None
+    if present:
+        present, clock_hour_correction, clock_endpoint_error_ms, aligned_status = (
+            align_presentmon_to_b14(present, starts)
+        )
+        present_status = aligned_status
     in_present = [p for p in present if record_start <= p["unix_ms"] <= record_end]
     # The official PresentMon v2 default CSV calls the API-to-API gap
     # MsBetweenPresents; not the older/unsupported MsBetweenAppPresents.
@@ -198,6 +240,8 @@ def metrics_for(archive_path: str) -> dict:
         "b15_4_stream_cpu_us_p95": percentile(
             [float(row["stream_cpu_us"]) for row in costs if row.get("stream_cpu_us")], .95),
         "presentmon_status": present_status,
+        "presentmon_clock_hour_correction": clock_hour_correction,
+        "presentmon_clock_endpoint_error_ms": clock_endpoint_error_ms,
         "presentmon_frames_in_video": len(in_present),
         "presentmon_app_present_p95_ms": percentile(present_gaps, .95),
         "presentmon_display_change_p95_ms": percentile(display_gaps, .95),
@@ -205,7 +249,10 @@ def metrics_for(archive_path: str) -> dict:
         "focus_edits": focus,
         "timing_caveat": ("B14 wall-clock gaps and PresentMon API timestamps are distinct "
                           "measurements; 1s proximity is association, not causation. "
-                          "No PresentMon means independent presentation is unmeasured."),
+                          "PresentMon datetime is aligned to B14 only after a "
+                          "validated whole-hour offset and documented residual "
+                          "endpoint error. No PresentMon means independent "
+                          "presentation is unmeasured."),
     }
 
 
@@ -219,7 +266,29 @@ def selftest() -> None:
     assert status == "timestamped" and pres[0]["unix_ms"] == 1795603089000
     assert pres[0]["MsBetweenPresents"] == 16.7
     assert pres[0]["MsBetweenDisplayChange"] == 16.9
-    print("B15_4_CORRELATOR_SELFTEST_PASS")
+    # Regression: a real 2026-11-25 local Windows capture emitted PresentMon
+    # 06:56, while the independently recorded B14 UTC trace began 12:56.
+    # The parser must accept an unpadded hour and correct exactly +3h
+    # relative to the recorded -03:00 Windows timezone.
+    recent = (
+        "CPUStartDateTime,MsBetweenPresents,MsBetweenDisplayChange,MsGPUTime\n"
+        "2026-11-25 6:56:29.764096900,16.6,16.7,9.2\n"
+        "2026-11-25 6:56:59.806668100,16.8,16.7,8.4\n"
+    )
+    parsed, status = presentmon_rows(recent, -180)
+    assert status == "timestamped" and len(parsed) == 2
+    aligned, correction, endpoint, state = align_presentmon_to_b14(
+        parsed, [1795611389416, 1795611419865]
+    )
+    assert correction == 3 and state == "timestamped_b14_aligned"
+    assert endpoint < 400
+    assert aligned[0]["unix_ms"] == 1795611389764
+    assert len([p for p in aligned if 1795611401436 <= p["unix_ms"] <= 1795611416436]) == 0
+    unmatched, _, _, state = align_presentmon_to_b14(
+        [{"unix_ms": 0}, {"unix_ms": 1000}], [1795611389416, 1795611419865]
+    )
+    assert state == "presentmon_clock_unaligned" and unmatched == []
+    print("B15_4_CORRELATOR_SELFTEST_PASS timestamp_hour_compat and_b14_utc_alignment")
 
 
 def main() -> None:
