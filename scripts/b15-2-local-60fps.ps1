@@ -387,6 +387,7 @@ try {
         capture_backend = $CaptureBackend
         dxgi_output_idx = $DxgiOutputIdx
         ffmpeg_version = $ffmpegVersion
+        local_utc_offset_minutes = [int]([TimeZoneInfo]::Local.GetUtcOffset([DateTime]::Now).TotalMinutes)
         capture_source_offset = [ordered]@{ x=$captureX; y=$captureY }
         scripted_edits_requested = if ($Mode -eq 'Auto') { 6 } else { 0 }
         b15_4_correlate = $true
