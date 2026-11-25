@@ -266,7 +266,7 @@ try {
         }
         $pmDuration = $DurationSeconds + 90
         $pmArgs = '--process_id {0} --output_file "{1}" --date_time --timed {2} --terminate_on_proc_exit --no_console_stats --session_name B154_{0}' -f $game.Id, $presentMonCsv, $pmDuration
-        $presentMon = Start-Process -FilePath $PresentMonPath -ArgumentList $pmArgs -PassThru `
+        $presentMon = Start-Process -FilePath $PresentMonPath -ArgumentList $pmArgs -PassThru -WindowStyle Hidden `
             -RedirectStandardOutput (Join-Path $session 'presentmon.stdout.log') `
             -RedirectStandardError (Join-Path $session 'presentmon.stderr.log')
         $presentMonStarted = $true
@@ -396,6 +396,7 @@ try {
         far_shell = $FarShell
         atomic_edits = $AtomicEdits
         expected_requested_fps = $Fps
+        expected_recording_duration_seconds = $DurationSeconds
         video_encoded_fps = $encodedFps
         video_fps_qualified = $qualifies
         dynamic_preflight_delta = [math]::Round($delta,3)
