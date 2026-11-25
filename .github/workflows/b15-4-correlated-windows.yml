@@ -17,35 +17,35 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_RELEASE_DEBUG: '0'
-      CARGO_TARGET_DIR: ${{ github.workspace }}\\..\\_b6_cargo_target
+      CARGO_TARGET_DIR: ${{ github.workspace }}\..\_b6_cargo_target
       SANDBOX_B15_4_CORRELATE: '1'
     steps:
       - uses: actions/checkout@v4
       - name: Parse PowerShell 5.1 capture and diagnostic scripts
         shell: cmd
-        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b15-2-parse-powershell.ps1"
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-2-parse-powershell.ps1"
       - name: Validate DXGI and ANSI parser contracts
         shell: cmd
         run: |
-          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b15-2-local-60fps.ps1" -ContractTest
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-2-local-60fps.ps1" -ContractTest
           if errorlevel 1 exit /b 1
-          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b15-3-local-dxgi-matrix.ps1" -ContractTest
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-3-local-dxgi-matrix.ps1" -ContractTest
           if errorlevel 1 exit /b 1
       - name: Reuse Windows MSVC Rust environment
         shell: cmd
         env:
-          CARGO_HOME: ${{ runner.temp }}\\b0-cargo
-          RUSTUP_HOME: ${{ runner.temp }}\\b0-rustup
+          CARGO_HOME: ${{ runner.temp }}\b0-cargo
+          RUSTUP_HOME: ${{ runner.temp }}\b0-rustup
         run: |
-          if not exist "%CARGO_HOME%\\bin\\rustup.exe" (
-            curl.exe --proto =https --tlsv1.2 --retry 3 -fL -o "%RUNNER_TEMP%\\rustup-init.exe" https://win.rustup.rs/x86_64
+          if not exist "%CARGO_HOME%\bin\rustup.exe" (
+            curl.exe --proto =https --tlsv1.2 --retry 3 -fL -o "%RUNNER_TEMP%\rustup-init.exe" https://win.rustup.rs/x86_64
             if errorlevel 1 exit /b 1
-            "%RUNNER_TEMP%\\rustup-init.exe" -y --no-modify-path --default-toolchain none
+            "%RUNNER_TEMP%\rustup-init.exe" -y --no-modify-path --default-toolchain none
             if errorlevel 1 exit /b 1
           )
-          "%CARGO_HOME%\\bin\\rustup.exe" toolchain install 1.100.0 --profile minimal --no-self-update
+          "%CARGO_HOME%\bin\rustup.exe" toolchain install 1.100.0 --profile minimal --no-self-update
           if errorlevel 1 exit /b 1
-          echo %CARGO_HOME%\\bin>>"%GITHUB_PATH%"
+          echo %CARGO_HOME%\bin>>"%GITHUB_PATH%"
           echo CARGO_HOME=%CARGO_HOME%>>"%GITHUB_ENV%"
           echo RUSTUP_HOME=%RUSTUP_HOME%>>"%GITHUB_ENV%"
       - name: Validate world and streaming contracts
@@ -57,17 +57,17 @@ jobs:
       - name: Package new instrumented Windows executable
         shell: cmd
         run: |
-          if not exist "b15-4-runtime\\assets" mkdir "b15-4-runtime\\assets"
-          copy /Y "%CARGO_TARGET_DIR%\\release\\sandbox-game.exe" "b15-4-runtime\\sandbox-game.exe"
+          if not exist "b15-4-runtime\assets" mkdir "b15-4-runtime\assets"
+          copy /Y "%CARGO_TARGET_DIR%\release\sandbox-game.exe" "b15-4-runtime\sandbox-game.exe"
           if errorlevel 1 exit /b 1
-          xcopy /E /I /Y "assets\\shaders" "b15-4-runtime\\assets\\shaders"
+          xcopy /E /I /Y "assets\shaders" "b15-4-runtime\assets\shaders"
           if errorlevel 1 exit /b 1
       - name: Re-run identical-cost baseline, atomic B11-on and atomic B11-off Vulkan arms
         shell: cmd
-        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b15-2-windows-matrix.ps1"
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-2-windows-matrix.ps1"
       - name: Check synchronized B15.4 CPU/LOD evidence for all arms
         shell: cmd
-        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b15-4-ci-check.ps1"
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-4-ci-check.ps1"
       - if: always()
         uses: actions/upload-artifact@v4
         with:
