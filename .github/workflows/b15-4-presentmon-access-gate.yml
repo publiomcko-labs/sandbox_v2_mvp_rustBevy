@@ -1,0 +1,26 @@
+name: B15.4 PresentMon access-denied preflight contract
+on:
+  push:
+    branches:
+      - 'test/b15-4-presentmon-access-20261125'
+permissions:
+  contents: read
+jobs:
+  windows-contract:
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse corrected Windows PowerShell scripts
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-2-parse-powershell.ps1"
+      - name: Validate PresentMon denial is detected before long recordings
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-2-local-60fps.ps1" -ContractTest
+      - name: Upload corrected local script
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b15-4-presentmon-access-fix
+          path: scripts/b15-2-local-60fps.ps1
+          if-no-files-found: error
