@@ -237,7 +237,9 @@ if (-not $python -or -not (Test-Path -LiteralPath $correlator)) {
     throw 'B15_4_CORRELATOR_UNAVAILABLE: python.exe and b15-4-correlate.py are required; raw capture ZIPs and summary remain saved.'
 }
 $correlationPath = Join-Path $OutputRoot "b15-4-correlation-$started.json"
-& $python.Source $correlator $results[0].archive $results[1].archive --out "$correlationPath"
+$onArchive = [string]$results[0].archive
+$offArchive = [string]$results[1].archive
+& $python.Source "$correlator" "$onArchive" "$offArchive" --out "$correlationPath"
 if ($LASTEXITCODE -ne 0) {
     throw "B15_4_CORRELATOR_FAILED: inspect saved archives, $correlationPath"
 }
