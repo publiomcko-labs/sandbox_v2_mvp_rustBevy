@@ -1,0 +1,68 @@
+{
+  "schema": "sandbox_comparison_contract_v1",
+  "id": "survey46-six-edits-v1",
+  "duration_s": 46,
+  "warmup_s": 12,
+  "resolution": [
+    1920,
+    1080
+  ],
+  "requested_speed_mps": 18,
+  "visual_horizon_m": 130,
+  "segments": [
+    {
+      "start_s": 0,
+      "end_s": 12,
+      "direction": "hold"
+    },
+    {
+      "start_s": 12,
+      "end_s": 30,
+      "direction": "+x"
+    },
+    {
+      "start_s": 30,
+      "end_s": 46,
+      "direction": "-z"
+    }
+  ],
+  "edits": {
+    "seconds": [
+      25,
+      28,
+      31,
+      34,
+      37,
+      40
+    ],
+    "modes": [
+      "subtract",
+      "add",
+      "subtract",
+      "add",
+      "subtract",
+      "add"
+    ],
+    "radius_m": 1.5,
+    "target": "terrain_surface_below_camera"
+  },
+  "repetitions": 3,
+  "methodology": {
+    "require_same_physical_machine": true,
+    "require_same_graphics_resolution": true,
+    "prohibit_headless_as_graphics_acceptance": true,
+    "prohibit_capture_during_performance_run": true,
+    "record_gpu_cpu_driver_renderer_and_version": true,
+    "scene_content_equivalent": false,
+    "reason": "Engines intentionally use different terrain generators and base scenes; route and edit times are standardized, geometric workload is not yet identical.",
+    "primary_metric": "application_frame_start_interval_ms",
+    "presentation_metric": "NOT_MEASURED_WITHOUT_EXTERNAL_PRESENT_TRACE",
+    "edit_latency_metric": "input_to_first_presented_pixel_NOT_MEASURED",
+    "rock_water": "functional_presence_only_not_equivalent_workload",
+    "test_matrix": [
+      "cold_fresh_journal",
+      "warm_revisit_same_journal"
+    ],
+    "acceptance": "DIAGNOSTIC_ONLY_DO_NOT_INFER_STRICT_60FPS_130M_OR_100MS"
+  }
+}

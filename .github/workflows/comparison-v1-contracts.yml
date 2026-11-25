@@ -1,0 +1,21 @@
+name: Comparison V1 portable benchmark contracts (no heavy runtime)
+on:
+  push:
+    branches:
+      - bench/comparison-v1-20261125
+    paths:
+      - 'benchmarks/comparison-v1.json'
+      - 'scripts/comparison-v1-reduce.py'
+      - 'tests/test_comparison_v1.py'
+      - '.github/workflows/comparison-v1-contracts.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contract-unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shared scenario and parser only (NO GPU benchmark)
+        run: python3 -m unittest discover -s tests -p test_comparison_v1.py -v
