@@ -1,5 +1,6 @@
-# B15.2 interactive regional desktop capture of Vulkan client area.
-# Requires an interactive Windows desktop and FFmpeg+ffprobe. Never use Session 0.
+# B15.3 interactive Vulkan capture: DXGI desktop duplication (preferred)
+# versus legacy GDI. Requires interactive Windows desktop, FFmpeg+ffprobe.
+# DXGI outputs D3D11 hardware frames directly to NVENC; never use Session 0.
 param(
     [string]$AppDir = 'C:\Dev\sandbox-b15-2-local\app',
     [string]$OutputRoot = 'C:\Dev\sandbox-b15-2-local\captures',
@@ -8,10 +9,66 @@ param(
     [ValidateRange(24,60)][int]$Fps = 60,
     [ValidateSet('0','1')][string]$FarShell = '1',
     [ValidateSet('0','1')][string]$AtomicEdits = '1',
-    [ValidateSet('Nvenc','Cpu')][string]$Encoder = 'Nvenc'
+    [ValidateSet('Nvenc','Cpu')][string]$Encoder = 'Nvenc',
+    [ValidateSet('Dxgi','Gdi')][string]$CaptureBackend = 'Dxgi',
+    [ValidateRange(0,16)][int]$DxgiOutputIdx = 0,
+    [switch]$ContractTest
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+function Get-B15_3InputArgs {
+    param(
+        [string]$Backend, [int]$Rate, [int]$X, [int]$Y,
+        [int]$Width, [int]$Height, [int]$OutputIdx
+    )
+    $size = "${Width}x${Height}"
+    if ($Backend -eq 'Dxgi') {
+        # GPU-only D3D11 frames: no hwdownload or GDI screen copy.
+        $src = "ddagrab=output_idx=${OutputIdx}:framerate=${Rate}:draw_mouse=0:video_size=${size}:offset_x=${X}:offset_y=${Y}"
+        return @('-f','lavfi','-i',$src)
+    }
+    return @('-f','gdigrab','-framerate',"$Rate",'-draw_mouse','0',
+        '-offset_x',"$X",'-offset_y',"$Y",'-video_size',$size,'-i','desktop')
+}
+function Get-B15_3EncodeArgs {
+    param([string]$Backend,[string]$Encoder,[int]$Quality)
+    if ($Backend -eq 'Dxgi' -and $Encoder -ne 'Nvenc') {
+        throw 'B15_3_DXGI_REQUIRES_NVENC: D3D11 frames must stay on the GPU. For CPU fallback choose -CaptureBackend Gdi -Encoder Cpu.'
+    }
+    if ($Encoder -eq 'Nvenc') {
+        # DXGI hardware frames are submitted directly to NVENC without
+        # forcing a software -pix_fmt (which would break D3D11 zero-copy).
+        $encoderArgs = @('-c:v','h264_nvenc','-preset','p1',
+            '-rc','vbr','-cq',"$Quality",'-b:v','0')
+        if ($Backend -eq 'Gdi') { $encoderArgs += @('-pix_fmt','yuv420p') }
+        return $encoderArgs
+    }
+    return @('-c:v','libx264','-preset','ultrafast',
+        '-crf',"$Quality",'-pix_fmt','yuv420p')
+}
+if ($ContractTest) {
+    $dx = @(Get-B15_3InputArgs -Backend Dxgi -Rate 60 -X 294 -Y 317 -Width 1920 -Height 1080 -OutputIdx 0)
+    $ge = @(Get-B15_3InputArgs -Backend Gdi -Rate 60 -X 294 -Y 317 -Width 1920 -Height 1080 -OutputIdx 0)
+    $ne = @(Get-B15_3EncodeArgs -Backend Dxgi -Encoder Nvenc -Quality 22)
+    $ce = @(Get-B15_3EncodeArgs -Backend Gdi -Encoder Cpu -Quality 20)
+    if ((($dx -join ' ') -notmatch 'ddagrab=output_idx=0:framerate=60:draw_mouse=0:video_size=1920x1080:offset_x=294:offset_y=317') -or
+        $dx -contains 'gdigrab' -or $dx -contains 'desktop' -or
+        $ge -notcontains 'gdigrab' -or $ge -notcontains 'desktop' -or
+        $ne -notcontains 'h264_nvenc' -or $ne -contains '-pix_fmt' -or
+        $ce -notcontains 'libx264') {
+        throw 'B15_3_CAPTURE_ARGS_CONTRACT_FAILED'
+    }
+    $rejected = $false
+    try {
+        [void]@(Get-B15_3EncodeArgs -Backend Dxgi -Encoder Cpu -Quality 20)
+    } catch { $rejected = $_.Exception.Message -like '*B15_3_DXGI_REQUIRES_NVENC*' }
+    if (-not $rejected) { throw 'B15_3_DXGI_CPU_GUARD_FAILED' }
+    Write-Host 'B15_3_CAPTURE_ARGS_CONTRACT_PASS dxgi_nvenc gdi_cpu no_hwdownload'
+    return
+}
+if ($CaptureBackend -eq 'Dxgi' -and $Encoder -ne 'Nvenc') {
+    throw 'B15_3_DXGI_REQUIRES_NVENC: use -CaptureBackend Gdi with -Encoder Cpu as fallback'
+}
 $exe = Join-Path $AppDir 'sandbox-game.exe'
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Missing $exe" }
 if (-not (Test-Path -LiteralPath (Join-Path $AppDir 'assets\shaders'))) {
@@ -19,6 +76,14 @@ if (-not (Test-Path -LiteralPath (Join-Path $AppDir 'assets\shaders'))) {
 }
 $ffmpeg = Get-Command ffmpeg.exe -ErrorAction Stop
 $ffprobe = Get-Command ffprobe.exe -ErrorAction Stop
+$ffmpegVersion = @(& $ffmpeg.Source -version | Select-Object -First 1)[0]
+if ($CaptureBackend -eq 'Dxgi') {
+    $filterList = @(& $ffmpeg.Source -hide_banner -filters)
+    if ($LASTEXITCODE -ne 0 -or
+        -not @($filterList | Where-Object { $_ -match '\\bddagrab\\b' }).Count) {
+        throw "B15_3_DXGI_FILTER_MISSING: $($ffmpeg.Source) has no ddagrab. Use FFmpeg 7.1.1 full_build."
+    }
+}
 if (-not ([System.Management.Automation.PSTypeName]'B15_2DesktopRect').Type) {
     Add-Type -TypeDefinition @'
 using System;
@@ -27,12 +92,20 @@ using System.Runtime.InteropServices;
 public struct B15_2_RECT { public int Left, Top, Right, Bottom; }
 [StructLayout(LayoutKind.Sequential)]
 public struct B15_2_POINT { public int X, Y; }
+[StructLayout(LayoutKind.Sequential)]
+public struct B15_2_MONITORINFO {
+    public int cbSize;
+    public B15_2_RECT rcMonitor, rcWork;
+    public uint dwFlags;
+}
 public static class B15_2DesktopRect {
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out B15_2_RECT rect);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hwnd, ref B15_2_POINT point);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out B15_2_RECT rect);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll")] public static extern bool GetMonitorInfo(IntPtr hmonitor, ref B15_2_MONITORINFO info);
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 }
 '@
@@ -50,7 +123,8 @@ $env:SANDBOX_B11_FAR_FIELD = '1'
 $env:SANDBOX_B15_2_FAR_FIELD = $FarShell
 $env:SANDBOX_B15_2_EDIT_ATOMIC = $AtomicEdits
 $env:SANDBOX_B15_1_STABLE_SLABS = '1'
-$env:SANDBOX_B15_1_SCRIPTED_EDITS = '0'
+# Auto is the fixed 18m/s route with six alternating add/subtract SDF edits.
+$env:SANDBOX_B15_1_SCRIPTED_EDITS = if ($Mode -eq 'Auto') { '1' } else { '0' }
 $env:SANDBOX_B9_CREATIVE = '1'
 $env:SANDBOX_B14_TRACE_DIR = $trace
 $env:SANDBOX_B4_SAVE_PATH = Join-Path $session 'world-b4.edits'
@@ -140,13 +214,42 @@ try {
         throw "B15_2_WINDOW_NOT_READY: no valid game region after 30s; last=$lastProbe. Restore the game window and inspect the latest game.stderr.log under $session"
     }
     Write-Host "B15_2_WINDOW_REGION x=$x y=$y size=${w}x${h} source=$regionSource"
+    $captureX = $x
+    $captureY = $y
+    $monitor = $null
+    if ($CaptureBackend -eq 'Dxgi') {
+        # DXGI offset_x/offset_y are local to the chosen monitor, unlike
+        # GDI's virtual-desktop coordinates.
+        $monitorHandle = [B15_2DesktopRect]::MonitorFromWindow($handle, 2)
+        if ($monitorHandle -eq [IntPtr]::Zero) {
+            throw 'B15_3_DXGI_MONITOR_NOT_FOUND'
+        }
+        $monitor = New-Object B15_2_MONITORINFO
+        $monitor.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([B15_2_MONITORINFO])
+        if (-not [B15_2DesktopRect]::GetMonitorInfo($monitorHandle, [ref]$monitor)) {
+            throw 'B15_3_DXGI_MONITOR_BOUNDS_FAILED'
+        }
+        $captureX = [int]($x - $monitor.rcMonitor.Left)
+        $captureY = [int]($y - $monitor.rcMonitor.Top)
+        $displayW = [int]($monitor.rcMonitor.Right - $monitor.rcMonitor.Left)
+        $displayH = [int]($monitor.rcMonitor.Bottom - $monitor.rcMonitor.Top)
+        if ($captureX -lt 0 -or $captureY -lt 0 -or
+            ($captureX + $w) -gt $displayW -or
+            ($captureY + $h) -gt $displayH) {
+            throw "B15_3_DXGI_WINDOW_SPANS_MONITORS: capture=${w}x${h} relative=${captureX},${captureY} monitor=${displayW}x${displayH}. Keep the game entirely on one monitor."
+        }
+        Write-Host "B15_3_DXGI_MONITOR output_idx=$DxgiOutputIdx relative=${captureX},${captureY} display=${displayW}x${displayH}"
+        if ($DxgiOutputIdx -ne 0) {
+            Write-Warning 'DXGI output index must correspond to this physical display; verify video pixels in preflight.'
+        }
+    }
     if ($Mode -eq 'Auto') {
         # The survey route holds the camera still for its first 12 game seconds.
         # Wait until the scripted motion has begun before testing video dynamics.
         Write-Host 'B15.2 AUTO: waiting for survey warmup to end before motion preflight.'
         Start-Sleep -Seconds 12
     }
-    Write-Host "B15_2_ENCODER_SELECTED $Encoder"
+    Write-Host "B15_3_CAPTURE_SELECTED backend=$CaptureBackend encoder=$Encoder ffmpeg=$ffmpegVersion"
     Write-Host 'PREFLIGHT: MOVE THE CAMERA OR WALK DURING THE NEXT 8 SECONDS.'
     # Match the direct interactive FFmpeg command proven to work on the
     # user's Windows desktop. Start-Process/-WindowStyle Hidden was returning
@@ -159,19 +262,11 @@ try {
         # Windows PowerShell 5.1 wraps native stderr records as errors;
         # do not let informational FFmpeg output become a terminating error.
         $ErrorActionPreference = 'Continue'
-        $preflightArgs = @(
-            '-y','-hide_banner','-loglevel','info',
-            '-f','gdigrab','-framerate','15','-draw_mouse','0',
-            '-offset_x',"$x",'-offset_y',"$y",'-video_size',"${w}x${h}",
-            '-i','desktop','-t','8'
-        )
-        if ($Encoder -eq 'Nvenc') {
-            $preflightArgs += @('-c:v','h264_nvenc','-preset','p1',
-                '-rc','vbr','-cq','26','-b:v','0')
-        } else {
-            $preflightArgs += @('-c:v','libx264','-preset','ultrafast','-crf','26')
-        }
-        $preflightArgs += @('-pix_fmt','yuv420p',"$preflight")
+        $preflightArgs = @('-y','-hide_banner','-loglevel','info')
+        $preflightArgs += @(Get-B15_3InputArgs -Backend $CaptureBackend -Rate 15 -X $captureX -Y $captureY -Width $w -Height $h -OutputIdx $DxgiOutputIdx)
+        $preflightArgs += @('-t','8')
+        $preflightArgs += @(Get-B15_3EncodeArgs -Backend $CaptureBackend -Encoder $Encoder -Quality 26)
+        $preflightArgs += @('-movflags','+faststart',"$preflight")
         & $ffmpeg.Source @preflightArgs 2>&1 |
             Out-File -LiteralPath $probeLog -Encoding UTF8
         $preflightExitCode = $LASTEXITCODE
@@ -221,19 +316,12 @@ try {
     $oldErrorPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $recordingArgs = @(
-            '-y','-hide_banner','-loglevel','info',
-            '-f','gdigrab','-framerate',"$Fps",'-draw_mouse','0',
-            '-offset_x',"$x",'-offset_y',"$y",'-video_size',"${w}x${h}",
-            '-i','desktop','-t',"$DurationSeconds"
-        )
-        if ($Encoder -eq 'Nvenc') {
-            $recordingArgs += @('-c:v','h264_nvenc','-preset','p1',
-                '-rc','vbr','-cq','22','-b:v','0')
-        } else {
-            $recordingArgs += @('-c:v','libx264','-preset','ultrafast','-crf','20')
-        }
-        $recordingArgs += @('-pix_fmt','yuv420p','-movflags','+faststart',"$video")
+        $recordingArgs = @('-y','-hide_banner','-loglevel','info')
+        $recordingArgs += @(Get-B15_3InputArgs -Backend $CaptureBackend -Rate $Fps -X $captureX -Y $captureY -Width $w -Height $h -OutputIdx $DxgiOutputIdx)
+        $recordingArgs += @('-t',"$DurationSeconds")
+        $recordingQuality = if ($Encoder -eq 'Nvenc') { 22 } else { 20 }
+        $recordingArgs += @(Get-B15_3EncodeArgs -Backend $CaptureBackend -Encoder $Encoder -Quality $recordingQuality)
+        $recordingArgs += @('-movflags','+faststart',"$video")
         & $ffmpeg.Source @recordingArgs 2>&1 |
             Out-File -LiteralPath $recordingLog -Encoding UTF8
         $recordingExitCode = $LASTEXITCODE
@@ -245,7 +333,7 @@ try {
     if ($recordingExists) {
         $recordingSize = (Get-Item -LiteralPath $video).Length
     }
-    Write-Host "B15_2_RECORDING_FFMPEG encoder=$Encoder exit=$recordingExitCode bytes=$recordingSize"
+    Write-Host "B15_2_RECORDING_FFMPEG backend=$CaptureBackend encoder=$Encoder exit=$recordingExitCode bytes=$recordingSize"
     if ($recordingExitCode -ne 0 -or $recordingSize -lt 100000) {
         $logTail = if (Test-Path -LiteralPath $recordingLog) {
             (Get-Content -LiteralPath $recordingLog -Tail 12) -join ' | '
@@ -267,6 +355,11 @@ try {
         source = 'B15.2 experimental edit-cohort and B11 shell isolation'
         mode = $Mode
         video_encoder = $Encoder
+        capture_backend = $CaptureBackend
+        dxgi_output_idx = $DxgiOutputIdx
+        ffmpeg_version = $ffmpegVersion
+        capture_source_offset = [ordered]@{ x=$captureX; y=$captureY }
+        scripted_edits_requested = if ($Mode -eq 'Auto') { 6 } else { 0 }
         far_shell = $FarShell
         atomic_edits = $AtomicEdits
         expected_requested_fps = $Fps
@@ -291,6 +384,20 @@ try {
     if ($game -and -not $game.HasExited) {
         Stop-Process -Id $game.Id -Force -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 500
+    }
+    if ($Mode -eq 'Auto') {
+        $gameLog = Join-Path $session 'game.stderr.log'
+        $scriptedCount = 0
+        if (Test-Path -LiteralPath $gameLog) {
+            $scriptedCount = ([regex]::Matches(
+                (Get-Content -LiteralPath $gameLog -Raw),
+                'B15\.1 scripted edit requested'
+            )).Count
+        }
+        Write-Host "B15_3_AUTOMATED_EDIT_COUNT=$scriptedCount expected=6"
+        if ($scriptedCount -ne 6) {
+            Write-Warning "B15_3_AUTOMATED_EDITS_INCOMPLETE: count=$scriptedCount. Evidence is retained; do not qualify the six-edit gate."
+        }
     }
     $archive = "$session.zip"
     Compress-Archive -Path (Join-Path $session '*') -DestinationPath $archive -Force
