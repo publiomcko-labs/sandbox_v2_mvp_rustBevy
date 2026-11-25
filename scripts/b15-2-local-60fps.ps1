@@ -225,7 +225,7 @@ try {
             throw 'B15_3_DXGI_MONITOR_NOT_FOUND'
         }
         $monitor = New-Object B15_2_MONITORINFO
-        $monitor.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([B15_2_MONITORINFO])
+        $monitor.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($monitor)
         if (-not [B15_2DesktopRect]::GetMonitorInfo($monitorHandle, [ref]$monitor)) {
             throw 'B15_3_DXGI_MONITOR_BOUNDS_FAILED'
         }
