@@ -21,6 +21,9 @@ jobs:
       - name: Validate DXGI NVENC and GDI command-line contracts
         shell: cmd
         run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b15-2-local-60fps.ps1" -ContractTest
+      - name: Validate ANSI tracing parser against B15.3 regression fixture
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\\scripts\\b15-3-local-dxgi-matrix.ps1" -ContractTest
       - name: Check commit whitespace
         shell: cmd
         run: git diff --check HEAD^ HEAD
