@@ -6,7 +6,9 @@ on:
     paths:
       - 'benchmarks/comparison-v1.json'
       - 'scripts/comparison-v1-reduce.py'
+      - 'scripts/comparison-v1-compare.py'
       - 'tests/test_comparison_v1.py'
+      - 'tests/test_comparison_aggregate_v1.py'
       - '.github/workflows/comparison-v1-contracts.yml'
   workflow_dispatch:
 permissions:
@@ -17,5 +19,5 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Validate shared scenario and parser only (NO GPU benchmark)
-        run: python3 -m unittest discover -s tests -p test_comparison_v1.py -v
+      - name: Validate shared scenario, reducer and pair comparator (NO GPU benchmark)
+        run: python3 -m unittest discover -s tests -p 'test_comparison*.py' -v
