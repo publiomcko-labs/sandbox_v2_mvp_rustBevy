@@ -32,6 +32,7 @@ struct BlockFrame {
 pub(super) struct B14FrameAudit {
     frames: BufWriter<File>,
     events: BufWriter<File>,
+    b15_4_correlated: Option<BufWriter<File>>,
     previous: HashMap<BlockCoord, BlockFrame>,
     prior_commits: u64,
     prior_evictions: u64,
@@ -50,8 +51,20 @@ impl B14FrameAudit {
         writeln!(events, "frame,game_t_s,unix_ms,x,y,z,event,old_lod,new_lod,old_revision,new_revision,old_published,new_published,old_view,new_view")?;
         frames.flush()?;
         events.flush()?;
+        // Identical instrumentation in B11-on and B11-off runs. Does not
+        // alter the stable B14 CSV schema or the off-by-default MVP.
+        let b15_4_correlated = if std::env::var("SANDBOX_B15_4_CORRELATE").as_deref()
+            == Ok("1")
+        {
+            let mut writer = BufWriter::new(File::create(directory.join("b15-4-costs.csv"))?);
+            writeln!(writer, "frame,game_t_s,unix_ms,stream_cpu_us,b14_observation_us,cancelled_lod_total,post_edit_repair_total,edit_transactions_total,transition_pending,transition_target,lod_commits_total,required,missing")?;
+            writer.flush()?;
+            Some(writer)
+        } else {
+            None
+        };
         Ok(Self {
-            frames, events, previous: HashMap::new(),
+            frames, events, b15_4_correlated, previous: HashMap::new(),
             prior_commits: 0, prior_evictions: 0, recorded_frames: 0,
             recorded_events: 0, write_failed: false,
         })
@@ -204,6 +217,25 @@ pub(super) fn trace_frame(
             state.dispatches, state.evictions, state.transition_commits,
             state.transition_pending.len(), state.transition_target.len(),
         ) { io_failure = Some(error); }
+    }
+    if io_failure.is_none() {
+        if let Some(writer) = audit.b15_4_correlated.as_mut() {
+            if let Err(error) = writeln!(
+                writer,
+                "{frame},{now:.4},{timestamp_ms},{},{observation_us},{},{},{},{},{},{},{required},{missing}",
+                state.b15_4_stream_cpu_last_us,
+                state.b15_2_cancelled_lod_jobs,
+                state.b15_2_post_edit_repair_blocks,
+                state.b15_2_edit_transactions,
+                state.transition_pending.len(),
+                state.transition_target.len(),
+                state.transition_commits,
+            ) {
+                io_failure = Some(error);
+            } else if let Err(error) = writer.flush() {
+                io_failure = Some(error);
+            }
+        }
     }
     if io_failure.is_none() {
         if let Err(error) = audit.frames.flush() { io_failure = Some(error); }
