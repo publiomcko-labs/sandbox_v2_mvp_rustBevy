@@ -12,6 +12,7 @@ use bevy::{
     render::render_resource::PrimitiveTopology,
 };
 use sandbox_world_core::density::terrain_height_half;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const SEED: u32 = 42;
 const STEP_M: i32 = 8;
@@ -94,8 +95,10 @@ fn maintain_far_coverage(
     mut meshes:ResMut<Assets<Mesh>>,
     mut materials:ResMut<Assets<StandardMaterial>>,
     mut shader_material:Local<Option<Handle<StandardMaterial>>>,
+    time:Res<Time>,
 ) {
     let Some(camera)=camera.iter().next() else{return;};
+    let correlated = std::env::var("SANDBOX_B15_4_CORRELATE").as_deref() == Ok("1");
     if shader_material.is_none() {
         *shader_material=Some(materials.add(StandardMaterial{
             base_color:Color::srgb(0.34,0.59,0.37),
@@ -116,6 +119,12 @@ fn maintain_far_coverage(
             if let Some((current,new_mesh,_))=state.pending.take(){
                 commands.entity(current).insert(Transform::IDENTITY);
                 state.active=Some((current,new_mesh));
+                if correlated {
+                    let unix_ms = SystemTime::now().duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_millis()).unwrap_or(0);
+                    info!(unix_ms,game_t_s=time.elapsed_secs(),revisions=state.revisions,
+                        "B15.4 far shell swap published to MainWorld");
+                }
             } else {
                 debug!(?entity,"B11 distant terrain swap already completed");
             }
@@ -125,7 +134,9 @@ fn maintain_far_coverage(
     if state.center==Some(snapped) || state.pending.is_some() {
         return;
     }
+    let build_started = Instant::now();
     let mesh=meshes.add(create_shell_mesh(snapped));
+    let build_us = build_started.elapsed().as_micros();
     let entity=commands.spawn((
         Mesh3d(mesh.clone()),
         MeshMaterial3d(shader_material.as_ref().unwrap().clone()),
@@ -137,9 +148,18 @@ fn maintain_far_coverage(
     state.pending=Some((entity,mesh,SWAP_DELAY_FRAMES));
     state.center=Some(snapped);
     state.revisions+=1;
-    info!(center_x=snapped.0,center_z=snapped.1,
-          inner_m=INNER_RADIUS_M,outer_m=OUTER_RADIUS_M,
-          revisions=state.revisions,"B11 far field coverage built");
+    if correlated {
+        let unix_ms = SystemTime::now().duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis()).unwrap_or(0);
+        info!(center_x=snapped.0,center_z=snapped.1,
+              inner_m=INNER_RADIUS_M,outer_m=OUTER_RADIUS_M,
+              revisions=state.revisions,build_us,unix_ms,
+              game_t_s=time.elapsed_secs(),"B11 far field coverage built");
+    } else {
+        info!(center_x=snapped.0,center_z=snapped.1,
+              inner_m=INNER_RADIUS_M,outer_m=OUTER_RADIUS_M,
+              revisions=state.revisions,"B11 far field coverage built");
+    }
 }
 
 #[cfg(test)]
