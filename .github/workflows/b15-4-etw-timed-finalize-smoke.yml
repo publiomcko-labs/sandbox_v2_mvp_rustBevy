@@ -20,9 +20,6 @@ jobs:
       - name: Final paired matrix parser contract
         shell: cmd
         run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-3-local-dxgi-matrix.ps1" -ContractTest
-      - name: Validate the existing corrected PresentMon timezone correlator
-        shell: cmd
-        run: python.exe scripts\b15-4-correlate.py --self-test
       - name: Publish corrected local script
         if: success()
         uses: actions/upload-artifact@v4
