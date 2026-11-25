@@ -106,7 +106,20 @@ impl Plugin for GpuTerrainB3Plugin {
         // B15.1: compare on/off under identical B14 instrumentation.
         // Larger initial slabs/growth reduce GPU-produced mesh relocation,
         // but increase reserved VRAM. No change unless explicitly selected.
-        if std::env::var("SANDBOX_B15_1_STABLE_SLABS").as_deref() == Ok("1") {
+        if std::env::var("SANDBOX_B15_5_FIXED_SLABS").as_deref() == Ok("1") {
+            // B15.5 opt-in only: Bevy's growing general slab reallocates its
+            // entire GPU buffer, displacing every compute-owned live mesh in
+            // that slab. B15.1 must then re-extract them all in one frame to
+            // avoid drawing invalid mesh contents. A fixed-size slab never
+            // grows: when it fills, Bevy allocates another independent slab.
+            // 32 MiB limits single-buffer reservation on a 4 GiB GPU;
+            // LOD0 with three transition faces fits well below this ceiling.
+            const SLAB_BYTES: u64 = 32 * 1024 * 1024;
+            settings.slab_allocator_settings.min_slab_size = SLAB_BYTES;
+            settings.slab_allocator_settings.max_slab_size = SLAB_BYTES;
+            info!(slab_bytes=SLAB_BYTES,
+                "B15.5 fixed GPU mesh slabs enabled; in-place growth disabled");
+        } else if std::env::var("SANDBOX_B15_1_STABLE_SLABS").as_deref() == Ok("1") {
             settings.slab_allocator_settings.min_slab_size = 16 * 1024 * 1024;
             settings.slab_allocator_settings.growth_factor = 2.0;
             info!("B15.1 stable GPU mesh slabs enabled (16 MiB min, growth 2x)");
