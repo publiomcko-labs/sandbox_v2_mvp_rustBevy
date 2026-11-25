@@ -1,0 +1,24 @@
+name: B15.4 PresentMon timezone and single-digit hour parser
+on:
+  push:
+    branches:
+      - 'fix/b15-4-presentmon-timestamp-alignment-20261125'
+permissions:
+  contents: read
+jobs:
+  python-clock-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python PresentMon v2 clock and B14 timeline regression
+        run: python3 scripts/b15-4-correlate.py --self-test
+      - name: Compile Python correlator
+        run: python3 -m py_compile scripts/b15-4-correlate.py
+      - name: Upload validated local correlator
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b15-4-presentmon-timestamp-fix
+          path: scripts/b15-4-correlate.py
+          if-no-files-found: error
