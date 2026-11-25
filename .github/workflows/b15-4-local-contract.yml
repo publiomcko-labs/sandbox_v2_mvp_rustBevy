@@ -1,0 +1,34 @@
+name: B15.4 final interactive capture scripts contract
+on:
+  push:
+    branches:
+      - 'test/b15-4-local-contract-20261125'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-parser:
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse final Windows PowerShell 5.1 scripts
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-2-parse-powershell.ps1"
+      - name: Prove DXGI and ANSI regression contracts
+        shell: cmd
+        run: |
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-2-local-60fps.ps1" -ContractTest
+          if errorlevel 1 exit /b 1
+          powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-3-local-dxgi-matrix.ps1" -ContractTest
+          if errorlevel 1 exit /b 1
+      - name: Archive final B15.4 local scripts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b15-4-final-local-tools
+          path: |
+            scripts/b15-2-local-60fps.ps1
+            scripts/b15-3-local-dxgi-matrix.ps1
+            scripts/b15-4-correlate.py
+          if-no-files-found: error
