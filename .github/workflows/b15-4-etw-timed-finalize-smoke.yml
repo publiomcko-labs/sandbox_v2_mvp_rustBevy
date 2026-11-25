@@ -1,0 +1,32 @@
+name: B15.4 PresentMon timed finalization contract
+on:
+  push:
+    branches:
+      - 'test/b15-4-presentmon-timed-finalize-20261125'
+permissions:
+  contents: read
+jobs:
+  windows-capture-contract:
+    runs-on: [self-hosted, Windows, X64, b1-vulkan-gpu]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Windows PowerShell 5.1 static parse
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-2-parse-powershell.ps1"
+      - name: Timed ETW finalization and DXGI argument contracts
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-2-local-60fps.ps1" -ContractTest
+      - name: Final paired matrix parser contract
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\b15-3-local-dxgi-matrix.ps1" -ContractTest
+      - name: Validate the existing corrected PresentMon timezone correlator
+        shell: cmd
+        run: python.exe scripts\b15-4-correlate.py --self-test
+      - name: Publish corrected local script
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b15-4-etw-timed-finalize-script
+          path: scripts/b15-2-local-60fps.ps1
+          if-no-files-found: error
