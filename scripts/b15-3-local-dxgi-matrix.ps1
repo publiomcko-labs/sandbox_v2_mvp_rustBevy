@@ -152,8 +152,16 @@ foreach ($arm in $arms) {
     if (Test-Path -LiteralPath $presentPath) {
         $presentBytes = (Get-Item -LiteralPath $presentPath).Length
     }
-    if (-not [string]::IsNullOrWhiteSpace($PresentMonPath) -and $presentBytes -lt 1000) {
+    if ([string]::IsNullOrWhiteSpace($PresentMonPath)) {
+        $reason += 'presentmon_not_requested'
+    } elseif ($presentBytes -lt 1000) {
         $reason += 'presentmon_missing_or_empty'
+    } else {
+        $presentHeader = Get-Content -LiteralPath $presentPath -TotalCount 1
+        if ($presentHeader -notmatch 'CPUStartDateTime' -or
+            $presentHeader -notmatch 'MsBetweenPresents') {
+            $reason += 'presentmon_timing_columns_missing'
+        }
     }
     if ($lastHorizon.Count -eq 0) { $reason += 'missing_final_horizon_audit' }
     if ($latencyMatches.Count -eq 0 -and $edits -gt 0) {
@@ -223,4 +231,15 @@ $summary = [ordered]@{
 $summaryPath = Join-Path $OutputRoot "b15-3-dxgi-matrix-$started.json"
 $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $summaryPath -Encoding UTF8
 Write-Host "B15_3_DXGI_MATRIX_SUMMARY=$summaryPath"
+$correlator = Join-Path $PSScriptRoot 'b15-4-correlate.py'
+$python = Get-Command python.exe -ErrorAction SilentlyContinue
+if (-not $python -or -not (Test-Path -LiteralPath $correlator)) {
+    throw 'B15_4_CORRELATOR_UNAVAILABLE: python.exe and b15-4-correlate.py are required; raw capture ZIPs and summary remain saved.'
+}
+$correlationPath = Join-Path $OutputRoot "b15-4-correlation-$started.json"
+& $python.Source $correlator $results[0].archive $results[1].archive --out "$correlationPath"
+if ($LASTEXITCODE -ne 0) {
+    throw "B15_4_CORRELATOR_FAILED: inspect saved archives, $correlationPath"
+}
+Write-Host "B15_4_CORRELATION_OUT=$correlationPath"
 Write-Host $status
